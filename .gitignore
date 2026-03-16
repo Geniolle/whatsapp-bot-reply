@@ -1,0 +1,15 @@
+# Dependências
+node_modules/
+
+# Sessões do WhatsApp (Muito importante para evitar roubo de conta)
+.wwebjs_auth/
+.wwebjs_cache/
+session/
+
+# Chaves e Configurações sensíveis
+.env
+credentials/
+
+# Logs e arquivos temporários
+*.log
+npm-debug.log*

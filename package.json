@@ -1,0 +1,18 @@
+{
+  "name": "whatsapp-bot-reply",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "googleapis": "^171.4.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.6"
+  }
+}
