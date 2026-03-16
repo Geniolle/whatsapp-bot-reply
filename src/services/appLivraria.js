@@ -1,0 +1,195 @@
+//###################################################################################
+// src/services/appLivraria.js
+//###################################################################################
+"use strict";
+
+const { readRange } = require("./sheets");
+
+function normHeader_v1(h) {
+  return String(h || "")
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function normalizeTextForSearch(text) {
+  return String(text || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") 
+    .toLowerCase()                   
+    .replace(/[^a-z0-9\s]/g, " ")    
+    .replace(/\s+/g, " ")            
+    .trim();
+}
+
+// =================================================================================
+// NOVA MAGIA: LISTA DE PALAVRAS A IGNORAR NA PESQUISA (Stopwords)
+// =================================================================================
+const STOP_WORDS = new Set([
+  "quais", "qual", "os", "as", "o", "a", "um", "uma", "do", "da", "de", "dos", "das", 
+  "livro", "livros", "quero", "ver", "gostaria", "tem", "temos", "sobre", "por", "favor", 
+  "na", "no", "com", "sao", "são", "e", "que", "me", "mostra", "mostre", "lista", "listar", 
+  "procurar", "pesquisar", "busca", "buscar", "tens", "queria", "saber", "algo", "algum"
+]);
+
+async function getLivrosEmStock_v1({ spreadsheetId, sheetName, searchTerm }) {
+  try {
+    const values = await readRange(spreadsheetId, `'${sheetName}'!A:ZZ`);
+    if (!values || values.length < 2) return "Ainda não temos livros registados no nosso stock.";
+
+    const header = values[0] || [];
+    const idxArtigo = header.findIndex((h) => normHeader_v1(h) === "ARTIGO");
+    const idxEditora = header.findIndex((h) => normHeader_v1(h) === "EDITORA");
+    const idxTitulos = header.findIndex((h) => normHeader_v1(h) === "TITULOS" || normHeader_v1(h) === "TITULO");
+    const idxAutor = header.findIndex((h) => normHeader_v1(h) === "AUTOR");
+    const idxValor = header.findIndex((h) => normHeader_v1(h) === "VALORCAPA");
+    const idxStock = header.findIndex((h) => normHeader_v1(h) === "STOCKATUAL");
+
+    if (idxTitulos < 0 || idxStock < 0) {
+      return "Não foi possível ler as colunas de stock corretamente. Verifique se as colunas TITULOS e STOCK ATUAL existem.";
+    }
+
+    const livrosDisponiveis = [];
+    const searchN = normalizeTextForSearch(searchTerm); 
+    
+    // Filtro Inteligente: Remove as palavras de conversação e deixa só as essenciais
+    let searchWords = [];
+    if (searchN) {
+      searchWords = searchN.split(" ").filter(word => {
+        if (STOP_WORDS.has(word)) return false; // Se for stopword, ignora
+        if (word.length === 1 && isNaN(Number(word))) return false; // Ignora letras soltas ("e", "o")
+        return true;
+      });
+    }
+
+    // Se o utilizador só digitou palavras vazias (ex: "Quais os livros que tem?")
+    if (searchN && searchWords.length === 0) {
+       return `Desculpa, não consegui extrair o nome de um autor ou título da frase "${searchTerm}".\n\nPara ser mais rápido, tenta escrever apenas o nome que procuras (Ex: "Rhema", "Lucado", "Fé")! 👇`;
+    }
+
+    for (let r = 1; r < values.length; r++) {
+      const row = values[r] || [];
+      const stockVal = Number(String(row[idxStock] || "0").trim());
+
+      if (!isNaN(stockVal) && stockVal > 0) {
+        const artigo = idxArtigo >= 0 ? String(row[idxArtigo] || "").trim() : "";
+        const editora = idxEditora >= 0 ? String(row[idxEditora] || "").trim() : "";
+        const titulo = String(row[idxTitulos] || "").trim();
+        const autor = idxAutor >= 0 ? String(row[idxAutor] || "").trim() : "";
+        
+        let valor = idxValor >= 0 ? String(row[idxValor] || "").trim() : "";
+        if (valor && !valor.includes("€")) valor += "€";
+
+        if (titulo) {
+          if (searchWords.length > 0) {
+            const combinedText = normalizeTextForSearch(`${titulo} ${autor} ${editora} ${artigo}`);
+            
+            // Só aprova se as palavras ÚTEIS da pesquisa existirem
+            const matchesAll = searchWords.every(word => combinedText.includes(word));
+            
+            if (!matchesAll) continue; 
+          }
+          livrosDisponiveis.push({ artigo, editora, titulo, autor, valor });
+        }
+      }
+    }
+
+    if (livrosDisponiveis.length === 0) {
+      if (searchN) return `Não encontrei nenhum livro, autor ou editora com a expressão "${searchWords.join(" ").toUpperCase()}" em stock. 😔\n\nPodes tentar pesquisar com outro termo, pedir a lista de *Autores*, ou escrever *Sair* para cancelar.`;
+      return "Neste momento não temos livros disponíveis em stock. 😔";
+    }
+
+    const lines = [];
+    if (searchN) {
+      lines.push(`🔍 *RESULTADOS DA PESQUISA PARA:* "${searchWords.join(" ").toUpperCase()}"\n`);
+    } else {
+      lines.push(`📚 *LISTA DE LIVROS DISPONÍVEIS - VERBO SHOP* 📚\n`);
+    }
+    
+    for (const livro of livrosDisponiveis) {
+      lines.push(`📖 *Título:* ${livro.titulo}`);
+      if (livro.autor) lines.push(`👤 *Autor:* ${livro.autor}`);
+      if (livro.editora) lines.push(`🏢 *Editora:* ${livro.editora}`);
+      if (livro.artigo) lines.push(`🔖 *Categoria:* ${livro.artigo}`);
+      if (livro.valor) lines.push(`💶 *Valor:* ${livro.valor}`);
+      lines.push(`〰️〰️〰️〰️〰️〰️〰️〰️`);
+    }
+
+    if (searchN) {
+      lines.push("\nSe desejares pesquisar outro, basta digitar o nome! Para finalizar a pesquisa escreve *Sair*.");
+    } else {
+      lines.push("\nSe desejares adquirir algum destes livros, basta dizeres-me qual o título pretendido! 🙏");
+    }
+
+    return lines.join("\n");
+
+  } catch (e) {
+    console.log("[LIVRARIA_ERR]", e?.message || e);
+    return "Desculpa, ocorreu um erro ao consultar o stock dos livros.";
+  }
+}
+
+// =================================================================================
+// 2. FUNÇÃO: LISTAR AUTORES OU EDITORAS
+// =================================================================================
+async function getListasLivraria_v1({ spreadsheetId, sheetName, tipo }) {
+  try {
+    const values = await readRange(spreadsheetId, `'${sheetName}'!A:ZZ`);
+    if (!values || values.length < 2) return "Ainda não temos livros registados no nosso stock.";
+
+    const header = values[0] || [];
+    const idxAutor = header.findIndex((h) => normHeader_v1(h) === "AUTOR");
+    const idxEditora = header.findIndex((h) => normHeader_v1(h) === "EDITORA");
+    const idxStock = header.findIndex((h) => normHeader_v1(h) === "STOCKATUAL");
+
+    if (idxStock < 0 || (tipo === "AUTORES" && idxAutor < 0) || (tipo === "EDITORAS" && idxEditora < 0)) {
+      return "Não foi possível ler as colunas corretamente. Verifique se as colunas existem.";
+    }
+
+    const items = new Set();
+
+    for (let r = 1; r < values.length; r++) {
+      const row = values[r] || [];
+      const stockVal = Number(String(row[idxStock] || "0").trim());
+
+      if (!isNaN(stockVal) && stockVal > 0) {
+        if (tipo === "AUTORES") {
+          const autor = String(row[idxAutor] || "").trim();
+          if (autor) items.add(autor); 
+        } else if (tipo === "EDITORAS") {
+          const editora = String(row[idxEditora] || "").trim();
+          if (editora) items.add(editora); 
+        }
+      }
+    }
+
+    const sortedItems = Array.from(items).sort((a, b) => a.localeCompare(b, "pt-PT", { sensitivity: "base" }));
+
+    if (sortedItems.length === 0) {
+      return `Neste momento não temos ${tipo.toLowerCase()} com livros disponíveis em stock.`;
+    }
+
+    const lines = [];
+    if (tipo === "AUTORES") {
+      lines.push("✍️ *AUTORES DISPONÍVEIS EM STOCK:*\n");
+    } else {
+      lines.push("🏢 *EDITORAS DISPONÍVEIS EM STOCK:*\n");
+    }
+
+    for (const item of sortedItems) {
+      lines.push(`▫️ ${item}`);
+    }
+
+    lines.push(`\nPara veres os livros de um deles, basta escrever o nome correspondente aqui em baixo! 👇 (Ou escreve "Sair" para cancelar)`);
+
+    return lines.join("\n");
+
+  } catch (e) {
+    console.log("[LIVRARIA_ERR]", e?.message || e);
+    return "Desculpa, ocorreu um erro ao consultar a lista solicitada.";
+  }
+}
+
+module.exports = { getLivrosEmStock_v1, getListasLivraria_v1 };

@@ -1,13 +1,17 @@
 ﻿//###################################################################################
+// src/router.js
+//###################################################################################
+
+//###################################################################################
 // Normalização
 //###################################################################################
 function normalizeText(s) {
   return String(s || "")
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[\u0300-\u036f]/g, "") // Remove acentos
+    .toLowerCase()                   // Passa tudo a minúsculas
+    .replace(/[^a-z0-9\s]/g, " ")    // Remove caracteres especiais
+    .replace(/\s+/g, " ")            // Remove espaços duplos
     .trim();
 }
 
@@ -36,7 +40,7 @@ function escapeRegex(s) {
 function splitKeywords(keyRaw) {
   return String(keyRaw || "")
     .split(/[|,;]+/g)
-    .map((k) => normalizeText(k))
+    .map((k) => normalizeText(k)) // Normaliza as keywords da sheet
     .filter(Boolean);
 }
 
@@ -57,7 +61,9 @@ function hasKeyword(msgN, kwN) {
 // Router: match
 //###################################################################################
 function decideReply(text, rules) {
+  // rawMsg: Mensagem exata como o utilizador enviou (com acentos e maiúsculas)
   const rawMsg = String(text || "").trim();
+  // msgN: Mensagem completamente limpa (sem acentos, sem pontuação, tudo minúsculo)
   const msgN = normalizeText(rawMsg);
 
   for (const rule of rules) {
@@ -68,22 +74,26 @@ function decideReply(text, rules) {
     if (type === "SPECIAL") continue;
 
     if (type === "REGEX") {
-      // regex no texto normalizado para suportar sem acentos
       try {
-        const re = new RegExp(keyRaw, "i");
-        if (re.test(msgN)) return String(rule.resposta || "").trim();
+        const re = new RegExp(keyRaw, "i"); // "i" garante que ignora maiúsculas/minúsculas
+        // Testa a regra do REGEX tanto na mensagem limpa como na original
+        if (re.test(msgN) || re.test(rawMsg)) {
+          return String(rule.resposta || "").trim();
+        }
       } catch (_) {}
       continue;
     }
 
     if (type === "KEYWORDS") {
       const kws = splitKeywords(keyRaw);
+      // Aqui só precisa de testar contra o msgN, pois as keywords também já foram limpas
       if (kws.some((kw) => hasKeyword(msgN, kw))) {
         return String(rule.resposta || "").trim();
       }
       continue;
     }
 
+    // Normaliza a chave (da folha de cálculo) para EXACT ou CONTAINS
     const keyN = normalizeText(keyRaw);
 
     if (type === "EXACT") {

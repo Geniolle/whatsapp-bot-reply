@@ -8,28 +8,33 @@ const qrcode = require("qrcode-terminal");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
 //###################################################################################
-// Helper: delay
+// Helper: Human Delay
+// Cria um atraso variável para simular o tempo de pensamento/digitação humano
 //###################################################################################
-function sleep_v1(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Calcula um tempo de digitação baseado no tamanho do texto
+ * @param {string} text - O texto que será enviado
+ * @returns {number} - Milissegundos de atraso
+ */
+const getTypingDelay = (text) => {
+  const minDelay = 1500; // Mínimo de 1.5 segundos
+  const perCharDelay = 20; // 20ms por caractere
+  return Math.min(minDelay + (text.length * perCharDelay), 5000); // Máximo de 5 segundos
+};
 
 //###################################################################################
 // Start WhatsApp Client
 //###################################################################################
 async function startClient_v1(cfg = {}) {
-  //###################################################################################
-  // Auth folder (na raiz do projeto)
-  //###################################################################################
+  // Local onde a sessão será salva (na raiz do projeto conforme seu .gitignore)
   const authPath = path.resolve(process.cwd(), ".wwebjs_auth");
 
-  //###################################################################################
-  // Client config
-  //###################################################################################
   const client = new Client({
     authStrategy: new LocalAuth({ dataPath: authPath }),
     puppeteer: {
-      headless: true,
+      headless: true, // Mude para false se quiser ver o Chrome trabalhando
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -40,48 +45,51 @@ async function startClient_v1(cfg = {}) {
   });
 
   //###################################################################################
-  // Events
+  // Events: Monitoramento e Feedback
   //###################################################################################
   client.on("qr", (qr) => {
-    console.log("[WA_QR] Escaneie o QR Code abaixo:");
+    console.log("[WA_QR] Novo QR Code gerado. Escaneie para conectar:");
     qrcode.generate(qr, { small: true });
   });
 
   client.on("authenticated", () => {
-    console.log("[WA_AUTH] Autenticado");
+    console.log("[WA_AUTH] Sessão autenticada com sucesso!");
   });
 
   client.on("auth_failure", (msg) => {
-    console.log("[WA_AUTH_FAIL]", msg);
+    console.error("[WA_AUTH_FAIL] Falha na autenticação:", msg);
   });
 
   client.on("ready", () => {
-    console.log("[WA_READY] Client pronto");
+    console.log("[WA_READY] O bot está online e pronto para operar!");
   });
 
   client.on("disconnected", (reason) => {
-    console.log("[WA_DISCONNECTED]", reason);
+    console.warn("[WA_DISCONNECTED] O cliente foi desconectado:", reason);
   });
 
   //###################################################################################
-  // Init
+  // Initialization
   //###################################################################################
-  console.log("[WA_INIT] Iniciando...");
-  await client.initialize();
+  console.log("[WA_INIT] Inicializando o motor do WhatsApp...");
+  
+  try {
+    await client.initialize();
+  } catch (err) {
+    console.error("[WA_INIT_ERROR] Erro ao inicializar:", err);
+  }
 
-  //###################################################################################
-  // Aguarda READY (simples)
-  //###################################################################################
-  // Nota: whatsapp-web.js dispara "ready" async; aqui só damos um pequeno tempo
-  // para evitar race em alguns ambientes.
-  await sleep_v1(500);
+  // Pequeno fôlego para garantir que o socket está estável
+  await sleep(1000);
 
   return client;
 }
 
 //###################################################################################
-// Exports (compatível com o index.js)
+// Exports
 //###################################################################################
 module.exports = {
   startClient_v1,
+  sleep,
+  getTypingDelay
 };

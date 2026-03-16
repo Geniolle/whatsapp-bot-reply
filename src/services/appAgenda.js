@@ -352,9 +352,12 @@ function formatEventoLine_v1(ev, timeZone = "Europe/Lisbon") {
   const line1 = `🗓️ (${ddmmyyyy}) ${wd} | ${hora || "—"} — ${titulo}${locSuffix}`;
 
   const morada = cleanText_v1(ev.morada);
-  if (morada) return `${line1}\n📍 ${morada}`;
+  
+  // MUDANÇA AQUI: Adicionado "\n" (quebra de linha) no final de cada retorno 
+  // para garantir que haverá uma linha em branco entre cada evento!
+  if (morada) return `${line1}\n📍 ${morada}\n`;
 
-  return line1;
+  return `${line1}\n`;
 }
 
 function formatAgendaDepartamentosText_v1(groupsPayload, timeZone = "Europe/Lisbon") {

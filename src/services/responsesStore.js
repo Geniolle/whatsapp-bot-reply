@@ -56,6 +56,64 @@ function parseBoolLoose_v1(v, defVal) {
 }
 
 //###################################################################################
+// Motor de Humanização de Respostas
+//###################################################################################
+
+// Nova função: Descobre a hora automaticamente com o fuso horário de Portugal
+function getAutoTimeOfDay() {
+  try {
+    const parts = new Intl.DateTimeFormat("pt-PT", {
+      timeZone: "Europe/Lisbon",
+      hour: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date());
+
+    const hourStr = parts.find((p) => p.type === "hour")?.value || "12";
+    const h = Number(hourStr);
+
+    if (h >= 5 && h <= 11) return "bom dia";
+    if (h >= 12 && h <= 17) return "boa tarde";
+    return "boa noite";
+  } catch (_) {
+    const h = new Date().getHours();
+    if (h >= 5 && h <= 11) return "bom dia";
+    if (h >= 12 && h <= 17) return "boa tarde";
+    return "boa noite";
+  }
+}
+
+/**
+ * Constrói uma resposta humanizada a partir do texto do CSV
+ * @param {string} csvText - O texto vindo da coluna RESPOSTA do CSV
+ * @param {string} userName - O nome do utilizador (ex: "Thiago")
+ * @param {string} timeOfDay - A saudação do momento (ex: "bom dia")
+ * @returns {string} - A mensagem final formatada
+ */
+function buildHumanizedResponse(csvText, userName, timeOfDay) {
+  if (!csvText) return "";
+
+  // 1. Separar as opções de resposta usando o delimitador "||"
+  const options = csvText.split('||').map(opt => opt.trim());
+  
+  // 2. Escolher uma opção aleatoriamente
+  const randomIndex = Math.floor(Math.random() * options.length);
+  let selectedResponse = options[randomIndex];
+  
+  // 3. SUPER PODER: Se a variável timeOfDay chegar vazia, ele calcula a hora sozinho!
+  const actualTimeOfDay = timeOfDay || getAutoTimeOfDay();
+  
+  // 4. Substituir os placeholders pelas variáveis reais
+  // Usa-se Regex (/{variavel}/ig) para substituir todas as ocorrências na frase
+  selectedResponse = selectedResponse.replace(/{nome}/ig, userName ? userName : "irmão(ã)"); 
+  selectedResponse = selectedResponse.replace(/{saudacao_tempo}/ig, actualTimeOfDay);
+  
+  // 5. Limpeza de formatação (corrige espaços vazios se a variável não existir)
+  selectedResponse = selectedResponse.replace(/\s+!/g, '!').replace(/\s+,/g, ',');
+  
+  return selectedResponse;
+}
+
+//###################################################################################
 // Public: getRules (COMPAT total com router.js)
 //###################################################################################
 async function getRules(spreadsheetId, sheetNameResp, cacheSeconds) {
@@ -146,4 +204,5 @@ async function getRules(spreadsheetId, sheetNameResp, cacheSeconds) {
   return rules;
 }
 
-module.exports = { getRules };
+// Exportar a nova função juntamente com a getRules
+module.exports = { getRules, buildHumanizedResponse };
