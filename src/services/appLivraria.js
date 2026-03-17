@@ -25,13 +25,15 @@ function normalizeTextForSearch(text) {
 }
 
 // =================================================================================
-// NOVA MAGIA: LISTA DE PALAVRAS A IGNORAR NA PESQUISA (Stopwords)
+// LISTA DE PALAVRAS A IGNORAR NA PESQUISA (Agora com "mais", "detalhes", etc)
 // =================================================================================
 const STOP_WORDS = new Set([
   "quais", "qual", "os", "as", "o", "a", "um", "uma", "do", "da", "de", "dos", "das", 
-  "livro", "livros", "quero", "ver", "gostaria", "tem", "temos", "sobre", "por", "favor", 
+  "livro", "livros", "titulo", "titulos", "assunto", "tema", "temas", "fala", "falam", "falar", 
+  "quero", "ver", "gostaria", "tem", "temos", "sobre", "por", "favor", 
   "na", "no", "com", "sao", "são", "e", "que", "me", "mostra", "mostre", "lista", "listar", 
-  "procurar", "pesquisar", "busca", "buscar", "tens", "queria", "saber", "algo", "algum"
+  "procurar", "pesquisar", "busca", "buscar", "tens", "queria", "saber", "algo", "algum",
+  "mais", "informacao", "informacoes", "informações", "detalhe", "detalhes", "tudo", "todos", "poderia", "gostava"
 ]);
 
 async function getLivrosEmStock_v1({ spreadsheetId, sheetName, searchTerm }) {
@@ -54,17 +56,15 @@ async function getLivrosEmStock_v1({ spreadsheetId, sheetName, searchTerm }) {
     const livrosDisponiveis = [];
     const searchN = normalizeTextForSearch(searchTerm); 
     
-    // Filtro Inteligente: Remove as palavras de conversação e deixa só as essenciais
     let searchWords = [];
     if (searchN) {
       searchWords = searchN.split(" ").filter(word => {
-        if (STOP_WORDS.has(word)) return false; // Se for stopword, ignora
-        if (word.length === 1 && isNaN(Number(word))) return false; // Ignora letras soltas ("e", "o")
+        if (STOP_WORDS.has(word)) return false; 
+        if (word.length === 1 && isNaN(Number(word))) return false; 
         return true;
       });
     }
 
-    // Se o utilizador só digitou palavras vazias (ex: "Quais os livros que tem?")
     if (searchN && searchWords.length === 0) {
        return `Desculpa, não consegui extrair o nome de um autor ou título da frase "${searchTerm}".\n\nPara ser mais rápido, tenta escrever apenas o nome que procuras (Ex: "Rhema", "Lucado", "Fé")! 👇`;
     }
@@ -85,9 +85,10 @@ async function getLivrosEmStock_v1({ spreadsheetId, sheetName, searchTerm }) {
         if (titulo) {
           if (searchWords.length > 0) {
             const combinedText = normalizeTextForSearch(`${titulo} ${autor} ${editora} ${artigo}`);
+            const combinedWords = combinedText.split(/\s+/);
             
-            // Só aprova se as palavras ÚTEIS da pesquisa existirem
-            const matchesAll = searchWords.every(word => combinedText.includes(word));
+            // Só aprova se a palavra pesquisada existir "POR INTEIRO"
+            const matchesAll = searchWords.every(word => combinedWords.includes(word));
             
             if (!matchesAll) continue; 
           }
@@ -131,9 +132,6 @@ async function getLivrosEmStock_v1({ spreadsheetId, sheetName, searchTerm }) {
   }
 }
 
-// =================================================================================
-// 2. FUNÇÃO: LISTAR AUTORES OU EDITORAS
-// =================================================================================
 async function getListasLivraria_v1({ spreadsheetId, sheetName, tipo }) {
   try {
     const values = await readRange(spreadsheetId, `'${sheetName}'!A:ZZ`);
