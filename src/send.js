@@ -35,6 +35,8 @@ async function startClient_v1(cfg = {}) {
     authStrategy: new LocalAuth({ dataPath: authPath }),
     puppeteer: {
       headless: true, // Mude para false se quiser ver o Chrome trabalhando
+      timeout: 300000,          // <-- NOVO: 5 minutos de paciência para o Chrome abrir
+      protocolTimeout: 300000,  // <-- NOVO: 5 minutos para o protocolo de comunicação
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
