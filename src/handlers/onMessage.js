@@ -1,328 +1,195 @@
 ﻿//###################################################################################
-// src/handlers/onMessage.js
+// src/handlers/onMessage.js - VERSÃO CONSOLIDADA (Livraria, Agenda, Ensaio, Ausências)
 //###################################################################################
 "use strict";
 
 const { getRules, buildHumanizedResponse } = require("../services/responsesStore");
-const { decideReply, getSpecial, normalizeText } = require("../services/router");
-const { logFallback } = require("../services/fallbackLog");
 const { getAccessByChatId } = require("../services/bpLookup");
-const { analisarComIA } = require("../services/aiAssistant"); // <--- A NOSSA IA
+const { analisarComIA } = require("../services/aiAssistant");
 
-//###################################################################################
-// Config
-//###################################################################################
-const CLOSE_AFTER_MS = 30 * 60 * 1000; 
-const FALLBACK_DEFAULT = "Ups, não consegui entender. Podes tentar perguntar de outra forma?";
-const DEBUG_BP_ROW = String(process.env.DEBUG_BP_ROW || "false").toLowerCase() === "true";
+const FALLBACK_DEFAULT = "Ups, a minha ligação falhou por um instante. Podes repetir a pergunta?";
 
-const AGENDA_FOLLOWUP_TEXT =
-  "Gostavas de conhecer a programação de algum departamento em específico?\n\n" +
-  "Se sim, escreve '*Agenda Departamentos*'. Se preferires, podes também fazer outra pergunta.";
-
-//###################################################################################
-// Menu triggers
-//###################################################################################
-const MENU_TRIGGER_TEXTS = ["menu", "menu de informacoes", "menu de informações", "informacoes", "informações", "informação"];
-
-function shouldSendMenuNow_v1(text) {
+const MENU_TRIGGER_TEXTS = ["menu", "menu de informacoes", "informacoes"];
+function shouldSendMenuNow(text) {
   const t = String(text || "").toLowerCase().trim();
-  if (!t) return false;
-  if (MENU_TRIGGER_TEXTS.includes(t)) return true;
-  return MENU_TRIGGER_TEXTS.some((x) => t.includes(x));
+  return MENU_TRIGGER_TEXTS.some(x => t.includes(x));
 }
 
-function getDayGreetingPt_v1() {
+function getDayGreetingPt() {
   const h = new Date().getHours();
   if (h >= 5 && h <= 11) return "bom dia";
   if (h >= 12 && h <= 17) return "boa tarde";
   return "boa noite";
 }
 
-function getFirstName_v1(fullName) {
-  const s = String(fullName || "").trim();
-  if (!s) return "";
-  return s.split(/\s+/g)[0] || s;
+function getFirstName(fullName) {
+  return String(fullName || "").trim().split(/\s+/g)[0] || "";
 }
 
-function isIgnoredChat(from, cfg) {
-  if (!from || from === "status@broadcast" || from.endsWith("@g.us")) return true;
-  if (from.endsWith("@lid") && cfg?.ignoreLid) return true;
-  return false;
-}
-
-function validateCfgOrThrow(cfg) {
-  cfg.cacheSeconds = Number(cfg.cacheSeconds || 60);
-  cfg.cacheBpSeconds = Number(cfg.cacheBpSeconds || 300);
-  cfg.ignoreLid = Boolean(cfg.ignoreLid);
-  cfg.cacheAgendaSeconds = Number(cfg.cacheAgendaSeconds || 300);
-}
-
-//###################################################################################
-// Estado em memória
-//###################################################################################
 const greeted = new Set();
-const closeTimers = new Map();
-const closedChats = new Set();
-const userContexts = new Map(); 
-
-function resetChatState(chatId) {
-  greeted.delete(chatId);
-  userContexts.delete(chatId); 
-}
-
-//###################################################################################
-// Envio seguro e Simulação
-//###################################################################################
-async function safeSend(client, chatId, text) {
-  const msg = String(text || "").trim();
-  if (!msg) return false;
-  await client.sendMessage(chatId, msg);
-  return true;
-}
 
 async function simulateTyping(client, chatId, delayMs = 1500) {
   try {
-    if (typeof client.getChatById === 'function') {
-      const chat = await client.getChatById(chatId);
-      if (chat && typeof chat.sendStateTyping === 'function') await chat.sendStateTyping();
-    } else if (typeof client.startTyping === 'function') {
-      await client.startTyping(chatId);
-    } else if (typeof client.sendPresenceUpdate === 'function') {
-      await client.sendPresenceUpdate('composing', chatId);
-    }
+    const chat = await client.getChatById(chatId);
+    if (chat && chat.sendStateTyping) await chat.sendStateTyping();
   } catch (e) {}
   await new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+async function fetchAgendaDepartamentos_v1({ cfg }) {
   try {
-    if (typeof client.getChatById === 'function') {
-      const chat = await client.getChatById(chatId);
-      if (chat && typeof chat.clearState === 'function') await chat.clearState();
-    } else if (typeof client.stopTyping === 'function') {
-      await client.stopTyping(chatId);
-    } else if (typeof client.sendPresenceUpdate === 'function') {
-      await client.sendPresenceUpdate('available', chatId);
-    }
-  } catch (e) {}
-}
-
-function clearCloseTimer(chatId) {
-  const t = closeTimers.get(chatId);
-  if (t) clearTimeout(t);
-  closeTimers.delete(chatId);
-}
-
-function resetCloseTimer(client, chatId, closeText) {
-  if (closedChats.has(chatId)) return;
-  clearCloseTimer(chatId);
-  const closeMsg = String(closeText || "").trim();
-
-  const t = setTimeout(async () => {
-    try {
-      if (closedChats.has(chatId)) return;
-      if (closeMsg) {
-        await simulateTyping(client, chatId, 1000); 
-        await safeSend(client, chatId, closeMsg);
-      }
-      closedChats.add(chatId);
-      resetChatState(chatId);
-      clearCloseTimer(chatId);
-    } catch (e) {}
-  }, CLOSE_AFTER_MS);
-  closeTimers.set(chatId, t);
-}
-
-function tryDecideReply(bodyRaw, msgN, rules) {
-  const r1 = decideReply(msgN, rules);
-  if (r1) return r1;
-  const r2 = decideReply(bodyRaw, rules);
-  if (r2) return r2;
-  return "";
-}
-
-function getReplyFromRule_v1(rule) {
-  if (!rule || typeof rule !== "object") return "";
-  const v = rule.reply ?? rule.REPLY ?? rule.resposta ?? rule.RESPOSTA ?? rule.text ?? rule.TEXTO ?? "";
-  return String(v || "").trim();
-}
-
-//###################################################################################
-// Tokens de Ação
-//###################################################################################
-function isActionToken_v1(reply) {
-  return /^__.+__$/.test(String(reply || "").trim());
-}
-
-async function resolveActionToken_v1({ cfg, token, fullName, msgN, rawMsg }) {
-  const t = String(token || "").trim();
-
-  if (t === "__APP_AGENDA_FULL__") {
     let mod = require("../services/appAgenda");
     const payload = await mod.getAgendaDepartamentos_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon" });
-    return mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
-  }
-
-  if (t === "__APP_LIVRARIA__" || t === "__APP_LIVRARIA_SEARCH__") {
-    let mod = require("../services/appLivraria");
-    return await mod.getLivrosEmStock_v1({
-      spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4",
-      sheetName: "DB_STOCK",
-      searchTerm: t === "__APP_LIVRARIA_SEARCH__" ? String(rawMsg || "").trim() : ""
-    });
-  }
-
-  if (t === "__APP_LIVRARIA_AUTORES__" || t === "__APP_LIVRARIA_EDITORAS__") {
-    let mod = require("../services/appLivraria");
-    return await mod.getListasLivraria_v1({
-      spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4",
-      sheetName: "DB_STOCK",
-      tipo: t === "__APP_LIVRARIA_AUTORES__" ? "AUTORES" : "EDITORAS"
-    });
-  }
-
-  return "Não consegui processar o teu pedido neste momento.";
+    return mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon") || "";
+  } catch (e) { return ""; }
 }
 
-async function enrichAgendaReply_v1({ cfg, baseText }) {
-  try {
-    let mod = require("../services/appAgenda");
-    const events = await mod.getAgendaEventosMes_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon" });
-    const agendaLines = (events || []).map((ev) => mod.formatEventoLine_v1(ev, "Europe/Lisbon")).filter(Boolean);
-    const safeAgendaLines = agendaLines.length ? agendaLines : ["(Sem eventos registados até ao fim do mês.)"];
-    return baseText.replace("_APP_AGENDA_", safeAgendaLines.join("\n"));
-  } catch (e) { return baseText; }
-}
-
-//###################################################################################
-// Handler principal
-//###################################################################################
 function registerOnMessage_v5(client, cfg) {
-  validateCfgOrThrow(cfg);
-
   client.on("message_create", async (message) => {
     if (message.fromMe) return;
-    if (isIgnoredChat(message.from, cfg)) return;
-
+    
+    const contact = await message.getContact();
+    const chatId = contact.id._serialized;
     const bodyRaw = (message.body || "").trim();
     if (!bodyRaw) return;
 
-    const chatId = message.from;
-
-    if (closedChats.has(chatId)) {
-      closedChats.delete(chatId);
-      clearCloseTimer(chatId);
-      resetChatState(chatId);
-    }
-
     try {
       const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, cfg.cacheSeconds);
-      const closeText = String(getSpecial(allRules, "CLOSE_TEXT") || "").trim();
-      resetCloseTimer(client, chatId, closeText);
-
-      const msgN = normalizeText(bodyRaw);
-      let fullName = "";
-      let isColab = false;
-
+      
+      let fullName = "", isColab = false;
       try {
-        const acc = await getAccessByChatId({ spreadsheetId: cfg.spreadsheetId, sheetNameBp: cfg.sheetNameBp, chatId, cacheSeconds: cfg.cacheBpSeconds, debugRowLog: DEBUG_BP_ROW });
-        fullName = String(acc?.fullName || "").trim();
-        isColab = Boolean(acc?.isColab);
+        const acc = await getAccessByChatId({ spreadsheetId: cfg.spreadsheetId, sheetNameBp: cfg.sheetNameBp, chatId, cacheSeconds: cfg.cacheBpSeconds });
+        fullName = acc?.fullName || "";
+        isColab = !!acc?.isColab;
       } catch (e) {}
 
-      console.log("[TRACE_RX]", `chat=${chatId}`, `raw=${JSON.stringify(bodyRaw)}`);
-      console.log("[ACCESS]", `chat=${chatId}`, `isColab=${isColab}`);
+      console.log("[TRACE_RX]", `chat=${chatId}`, `raw="${bodyRaw}"`);
 
-      // 1. Menu Direto
-      if (shouldSendMenuNow_v1(msgN) || shouldSendMenuNow_v1(bodyRaw)) {
-        const menuText = getSpecial(allRules, "MENU") || "Menu não configurado.";
-        await simulateTyping(client, chatId, 1000); 
-        await safeSend(client, chatId, menuText);
-        console.log("[TRACE_TX]", `chat=${chatId}`, `send=Menu`);
-        return;
-      }
-
-      // 2. Saudação Inicial
+      // 1. GESTÃO DE SAUDAÇÃO INICIAL
+      let greetingText = "";
       if (!greeted.has(chatId)) {
         greeted.add(chatId);
-        const rawGreet = getSpecial(allRules, isColab ? "GREET_COLAB" : "GREET_PUBLIC") || "Olá!";
-        const humanizedGreeting = buildHumanizedResponse(rawGreet, getFirstName_v1(fullName), getDayGreetingPt_v1());
-        await simulateTyping(client, chatId, 2500);
-        await safeSend(client, chatId, humanizedGreeting);
-        console.log("[GREET]", chatId, fullName ? `(${fullName})` : "");
-        console.log("[TRACE_TX]", `chat=${chatId}`, `send=${JSON.stringify(humanizedGreeting)}`);
-        return;
+        const key = isColab ? "GREET_COLAB" : "GREET_PUBLIC";
+        const ruleGreet = allRules.find(r => (r.CHAVE || r.chave) === key) || allRules.find(r => (r.CHAVE || r.chave) === "GREET");
+        if (ruleGreet) {
+          greetingText = buildHumanizedResponse(ruleGreet.reply || ruleGreet.RESPOSTA, getFirstName(fullName), getDayGreetingPt());
+        }
       }
 
-      const rules = (allRules || []).filter(r => {
-        const a = String(r.access || r.ACCESS || "PUBLIC").trim().toUpperCase();
-        return a === "COLAB" ? isColab : true;
-      });
-
-      // 3. Verifica Correspondência na Folha de Cálculo
-      let reply = tryDecideReply(bodyRaw, msgN, rules);
-
-      // --- BLOQUEIO FORÇADO DAS REGRAS ANTIGAS ---
-      // Se a folha de cálculo tentar responder com o texto antigo, nós bloqueamos e atiramos para a IA!
-      if (reply && (reply.includes("Verbo Shop") || reply.includes("__APP_LIVRARIA"))) {
-         reply = ""; 
-         console.log("[FORCED BYPASS] Regra antiga da livraria ignorada. Passando para a IA.");
+      if (shouldSendMenuNow(bodyRaw)) {
+        const ruleMenu = allRules.find(r => (r.CHAVE || r.chave) === "MENU");
+        if (ruleMenu) return await client.sendMessage(chatId, ruleMenu.reply || ruleMenu.RESPOSTA);
       }
 
-      // SE ENCONTROU REGRA VÁLIDA NA FOLHA, RESPONDE E ACABA AQUI
-      if (reply) {
-         if (isActionToken_v1(reply)) {
-            reply = await resolveActionToken_v1({ cfg, token: reply, fullName, msgN, rawMsg: bodyRaw });
-         } else if (reply.includes("_APP_AGENDA_")) {
-            reply = await enrichAgendaReply_v1({ cfg, baseText: reply });
-         }
-         reply = buildHumanizedResponse(reply, getFirstName_v1(fullName), getDayGreetingPt_v1());
-         
-         await simulateTyping(client, chatId, 2500);
-         await safeSend(client, chatId, reply);
-         console.log("[MATCH FOLHA]", `chat=${chatId}`);
-         console.log("[TRACE_TX]", `chat=${chatId}`, `send=${JSON.stringify(reply)}`);
-         return;
+      // 2. CHAMADA DA IA
+      console.log("[IA] Analisando intenção...");
+      let aiResult = { id_table: "ERR", resposta: FALLBACK_DEFAULT };
+      try {
+        const agendaParaIA = await fetchAgendaDepartamentos_v1({ cfg });
+        aiResult = await analisarComIA(bodyRaw, getFirstName(fullName), [], allRules, agendaParaIA);
+      } catch (err) { aiResult = { id_table: "FALHA", resposta: "" }; }
+
+      let finalReply = String(aiResult.resposta || "").trim();
+      let usedIdTable = String(aiResult.id_table || "").trim();
+      let processoReal = "";
+
+      // 3. RADAR DE PROCESSOS (Livraria, Agenda, Colab)
+      if (usedIdTable && usedIdTable !== "IA_GENERICA" && usedIdTable !== "ERR") {
+          const regraExata = allRules.find(r => String(r.ID_TABLE || r.id_table) === usedIdTable);
+          if (regraExata) {
+              processoReal = String(regraExata.PROCESSO || regraExata.processo || "").trim();
+              
+              // Se a coluna processo estiver vazia na planilha, tenta ler do texto (fallback)
+              if (!processoReal) {
+                  const textoOri = String(regraExata.reply || regraExata.RESPOSTA || "");
+                  if (textoOri.includes("__APP_LIVRARIA_FILTRO_AUTOR__")) processoReal = "__APP_LIVRARIA_FILTRO_AUTOR__";
+                  else if (textoOri.includes("__APP_LIVRARIA_FILTRO_EDITORA__")) processoReal = "__APP_LIVRARIA_FILTRO_EDITORA__";
+                  else if (textoOri.includes("__APP_LIVRARIA_AUTORES__")) processoReal = "__APP_LIVRARIA_AUTORES__";
+                  else if (textoOri.includes("__APP_LIVRARIA_EDITORAS__")) processoReal = "__APP_LIVRARIA_EDITORAS__";
+                  else if (textoOri.includes("__APP_LIVRARIA_SEARCH__")) processoReal = "__APP_LIVRARIA_SEARCH__";
+                  else if (textoOri.includes("__APP_LIVRARIA__")) processoReal = "__APP_LIVRARIA__";
+                  else if (textoOri.includes("__APP_AGENDA_FULL__")) processoReal = "__APP_AGENDA_FULL__";
+                  else if (textoOri.includes("__APP_ENSAIO__")) processoReal = "__APP_ENSAIO__";
+                  else if (textoOri.includes("__AUSENCIAS__") || textoOri.includes("__APP_AUSENCIAS__")) processoReal = "__APP_AUSENCIAS__";
+              }
+
+              // Limpeza de etiquetas do texto final para o usuário
+              finalReply = finalReply
+                  .replace(/__APP_LIVRARIA_FILTRO_AUTOR__/g, "").replace(/__APP_LIVRARIA_FILTRO_EDITORA__/g, "")
+                  .replace(/__APP_LIVRARIA_AUTORES__/g, "").replace(/__APP_LIVRARIA_EDITORAS__/g, "")
+                  .replace(/__APP_LIVRARIA_SEARCH__/g, "").replace(/__APP_LIVRARIA__/g, "")
+                  .replace(/__APP_AGENDA_FULL__/g, "").replace(/__APP_ENSAIO__/g, "")
+                  .replace(/__APP_AUSENCIAS__/g, "").replace(/__AUSENCIAS__/g, "");
+          }
       }
 
-      // =======================================================================
-      // 4. A MAGIA DA IA (Entra aqui de certeza agora)
-      // =======================================================================
-      console.log("[IA] A chamar o ChatGPT para analisar a intenção...");
-      await simulateTyping(client, chatId, 2500);
-      
-      const firstName = getFirstName_v1(fullName);
-      const aiResult = await analisarComIA(bodyRaw, firstName);
-
-      if (aiResult.acao === "LIVRARIA") {
-          console.log(`[IA DECIDIU] Pesquisar livros pelo termo exato: "${aiResult.termo}"`);
-          reply = await resolveActionToken_v1({ cfg, token: "__APP_LIVRARIA_SEARCH__", fullName, msgN, rawMsg: aiResult.termo });
-
-      } else if (aiResult.acao === "AGENDA_MENSAL") {
-          console.log(`[IA DECIDIU] Ver agenda mensal.`);
-          reply = await enrichAgendaReply_v1({ cfg, baseText: "Conheça a nossa programação mensal:\n\n_APP_AGENDA_" });
-
-      } else if (aiResult.acao === "AGENDA_DEPT") {
-          console.log(`[IA DECIDIU] Ver agenda de departamentos.`);
-          reply = await resolveActionToken_v1({ cfg, token: "__APP_AGENDA_FULL__", fullName, msgN, rawMsg: "" });
-
-      } else if (aiResult.acao === "TEXTO") {
-          console.log(`[IA DECIDIU] Conversar naturalmente.`);
-          reply = aiResult.resposta;
+      // 4. BLOQUEIO DE SAUDAÇÃO DUPLA
+      if (finalReply === "SAUDACAO_DUPLA" || usedIdTable === "SAUDACAO_DUPLA") {
+        if (greetingText) {
+            finalReply = ""; usedIdTable = "Bloqueado_Duplicado";
+        } else {
+            finalReply = "Olá! Graça e paz. Como posso ajudar?"; usedIdTable = "Saudacao_IA";
+        }
       }
 
-      if (reply) {
-          await simulateTyping(client, chatId, 2500);
-          await safeSend(client, chatId, reply);
-          console.log("[TRACE_TX_IA]", `chat=${chatId}`, `send=${JSON.stringify(reply)}`);
-      } else {
-          try { await logFallback({ spreadsheetId: cfg.spreadsheetId, chatId, rawMsg: bodyRaw, normMsg: msgN }); } catch (e) {}
-          await safeSend(client, chatId, FALLBACK_DEFAULT);
+      // 5. EXECUÇÃO LÓGICA DOS PROCESSOS
+      if (processoReal) {
+          console.log(`[SISTEMA] Executando processo: ${processoReal}`);
+          try {
+              // --- COLABORADORES (Ensaio e Ausência) ---
+              if (processoReal === "__APP_ENSAIO__") {
+                  let mod = require("../services/appEnsaio");
+                  if (typeof mod.getEscalaEnsaios_v1 === "function") {
+                      const dados = await mod.getEscalaEnsaios_v1({ chatId, fullName });
+                      finalReply += "\n\n" + dados;
+                  }
+              } else if (processoReal === "__AUSENCIAS__" || processoReal === "__APP_AUSENCIAS__") {
+                  let mod = require("../services/appAusencias");
+                  if (typeof mod.getMinhasAusencias_v1 === "function") {
+                      const dados = await mod.getMinhasAusencias_v1({ chatId, fullName });
+                      finalReply += "\n\n" + dados;
+                  }
+              } 
+              // --- AGENDAS ---
+              else if (processoReal === "__APP_AGENDA_FULL__") {
+                  let mod = require("../services/appAgenda");
+                  const payload = await mod.getAgendaDepartamentos_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon" });
+                  finalReply += "\n\n" + mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
+              }
+              // --- LIVRARIA ---
+              else if (processoReal.includes("__APP_LIVRARIA")) {
+                  let mod = require("../services/appLivraria");
+                  let resLivraria = "";
+                  const sheetInfo = { spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4", sheetName: "DB_STOCK" };
+
+                  if (processoReal === "__APP_LIVRARIA__") resLivraria = await mod.getLivrosEmStock_v1({ ...sheetInfo, searchTerm: "" });
+                  else if (processoReal === "__APP_LIVRARIA_SEARCH__") resLivraria = await mod.getLivrosEmStock_v1({ ...sheetInfo, searchTerm: bodyRaw });
+                  else if (processoReal === "__APP_LIVRARIA_AUTORES__") resLivraria = await mod.getListasLivraria_v1({ ...sheetInfo, tipo: "AUTORES" });
+                  else if (processoReal === "__APP_LIVRARIA_EDITORAS__") resLivraria = await mod.getListasLivraria_v1({ ...sheetInfo, tipo: "EDITORAS" });
+                  else if (processoReal === "__APP_LIVRARIA_FILTRO_AUTOR__") resLivraria = await mod.getLivrosExclusivos_v1({ ...sheetInfo, tipoFiltro: "AUTOR", termoPesquisa: bodyRaw });
+                  else if (processoReal === "__APP_LIVRARIA_FILTRO_EDITORA__") resLivraria = await mod.getLivrosExclusivos_v1({ ...sheetInfo, tipoFiltro: "EDITORA", termoPesquisa: bodyRaw });
+
+                  finalReply += "\n\n" + resLivraria;
+              }
+          } catch (err) { console.error("[ERRO_PROCESSO]", err.message); }
       }
 
-    } catch (e) {
-      console.log("[CRITICAL_ERR]", e);
-    }
+      // 6. ENVIO FINAL (BOLHAS)
+      let textToSend = (greetingText && finalReply) ? `${greetingText}\n\n${finalReply}` : (greetingText || finalReply);
+      if (textToSend) {
+        const humanReply = buildHumanizedResponse(textToSend, getFirstName(fullName), getDayGreetingPt());
+        const mensagens = humanReply.split("|||");
+        
+        for (const bolha of mensagens) {
+          if (bolha.trim()) {
+            await simulateTyping(client, chatId, 1500);
+            await client.sendMessage(chatId, bolha.trim());
+          }
+        }
+        console.log(`[AUDITORIA] chat: ${chatId} | ID: ${usedIdTable} | Proc: ${processoReal || 'Nenhum'}`);
+      }
+    } catch (e) { console.error("[CRITICAL_ERR]", e); }
   });
 }
 
-function registerOnMessage_v4(client, cfg) { return registerOnMessage_v5(client, cfg); }
-module.exports = { registerOnMessage_v4, registerOnMessage_v5 };
+module.exports = { registerOnMessage_v5 };
