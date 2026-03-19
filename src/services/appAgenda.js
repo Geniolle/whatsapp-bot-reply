@@ -156,7 +156,7 @@ function buildAgendaIndexes_v1(header) {
 }
 
 //###################################################################################
-// Assinatura p/ dedupe (normaliza data + hora normalizada + titulo + local + morada)
+// Assinatura p/ dedupe
 //###################################################################################
 function normSigPart_v1(s) {
   return cleanText_v1(s)
@@ -171,7 +171,7 @@ function buildEventSignature_v1({ dataUtc, horaIni, titulo, localizacao, morada 
       ? `${dataUtc.getUTCFullYear()}-${pad2(dataUtc.getUTCMonth() + 1)}-${pad2(dataUtc.getUTCDate())}`
       : "";
 
-  const h = normSigPart_v1(parseTimeToHHhMM_v1(horaIni || "")); // <<< NORMALIZA HORA
+  const h = normSigPart_v1(parseTimeToHHhMM_v1(horaIni || ""));
   const t = normSigPart_v1(titulo || "");
   const l = normSigPart_v1(localizacao || "");
   const m = normSigPart_v1(morada || "");
@@ -180,7 +180,7 @@ function buildEventSignature_v1({ dataUtc, horaIni, titulo, localizacao, morada 
 }
 
 //###################################################################################
-// Agenda NORMAL (até fim do mês)
+// Agenda NORMAL (Lista simples do mês)
 //###################################################################################
 async function getAgendaEventosMes_v1({
   spreadsheetId,
@@ -242,17 +242,17 @@ async function getAgendaEventosMes_v1({
 }
 
 //###################################################################################
-// Agenda DEPARTAMENTOS (>= hoje)
-// - Agrupar por ORGANIZADOR
-// - Dedupe GLOBAL por assinatura (agora com hora normalizada)
+// Agenda DEPARTAMENTOS (Agrupado por Organizador, suporta filtro de Mês Atual)
 //###################################################################################
 async function getAgendaDepartamentos_v1({
   spreadsheetId,
   sheetNameAgenda,
   cacheSeconds = 300,
   timeZone = "Europe/Lisbon",
+  onlyCurrentMonth = false, // 🚨 NOVO: Interruptor para barrar meses futuros
 }) {
-  const key = `agenda:depts:v3:${spreadsheetId}:${sheetNameAgenda}`;
+  // O cache key muda para não misturar a pesquisa do mês com a pesquisa completa
+  const key = `agenda:depts:v4:${spreadsheetId}:${sheetNameAgenda}:${onlyCurrentMonth}`;
   const cached = cacheGet(key);
   if (cached !== null) return cached;
 
@@ -269,6 +269,7 @@ async function getAgendaDepartamentos_v1({
   const { idxTipo, idxOrg, idxData, idxHoraIni, idxTitulo, idxLocal, idxMorada } = buildAgendaIndexes_v1(header);
 
   const todayUtc = getTodayInTZ_ymdUTC_v1(timeZone);
+  const endMonthUtc = endOfMonthUTC_v1(todayUtc); // Calculamos o fim do mês atual
 
   const byOrg = new Map();
   const seenGlobal = new Set();
@@ -283,7 +284,10 @@ async function getAgendaDepartamentos_v1({
     const dUtc = parseDate_ddmmyyyy_v1(dataStr);
     if (!dUtc) continue;
 
-    if (dUtc.getTime() < todayUtc.getTime()) continue;
+    if (dUtc.getTime() < todayUtc.getTime()) continue; // Ignora o passado
+    
+    // 🚨 NOVO: Se o interruptor estiver ligado, ignora eventos depois do último dia deste mês!
+    if (onlyCurrentMonth && dUtc.getTime() > endMonthUtc.getTime()) continue;
 
     const org = idxOrg >= 0 ? cleanText_v1(row[idxOrg] ?? "") : "";
     const orgKey = org || "Sem Organizador";
@@ -353,8 +357,6 @@ function formatEventoLine_v1(ev, timeZone = "Europe/Lisbon") {
 
   const morada = cleanText_v1(ev.morada);
   
-  // MUDANÇA AQUI: Adicionado "\n" (quebra de linha) no final de cada retorno 
-  // para garantir que haverá uma linha em branco entre cada evento!
   if (morada) return `${line1}\n📍 ${morada}\n`;
 
   return `${line1}\n`;
@@ -362,10 +364,11 @@ function formatEventoLine_v1(ev, timeZone = "Europe/Lisbon") {
 
 function formatAgendaDepartamentosText_v1(groupsPayload, timeZone = "Europe/Lisbon") {
   const groups = Array.isArray(groupsPayload?.groups) ? groupsPayload.groups : [];
-  if (!groups.length) return "Não encontrei eventos de departamentos a partir de hoje.";
+  if (!groups.length) return "Não encontrei eventos na agenda para este período.";
 
   const out = [];
-  out.push("Agenda por departamentos (a partir de hoje):");
+  // Removi a frase fixa "a partir de hoje" pois agora pode ser só do mês
+  out.push("Aqui estão os eventos agendados por departamentos:");
   out.push("");
 
   for (const g of groups) {

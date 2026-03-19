@@ -1,5 +1,5 @@
 ﻿//###################################################################################
-// src/handlers/onMessage.js - VERSÃO DEFINITIVA (Com Mensagem no Logger)
+// src/handlers/onMessage.js
 //###################################################################################
 "use strict";
 
@@ -49,57 +49,82 @@ function registerOnMessage_v5(client, cfg) {
         isColab = !!accData?.isColab;
       } catch (e) {}
 
-      // 1. SAUDAÇÃO (BOT)
+      // 1. MAPEAMENTO DE SAUDAÇÕES
       let greetingText = "";
+      let greetIds = ["SAUDACAO_DUPLA"];
+      
+      const r1 = allRules.find(r => (r.CHAVE || r.chave) === "GREET_COLAB");
+      const r2 = allRules.find(r => (r.CHAVE || r.chave) === "GREET_PUBLIC");
+      const r3 = allRules.find(r => (r.CHAVE || r.chave) === "GREET");
+      
+      if (r1) greetIds.push(String(r1.ID_TABLE || r1.id_table));
+      if (r2) greetIds.push(String(r2.ID_TABLE || r2.id_table));
+      if (r3) greetIds.push(String(r3.ID_TABLE || r3.id_table));
+
       if (!greeted.has(chatId)) {
         greeted.add(chatId);
         const key = isColab ? "GREET_COLAB" : "GREET_PUBLIC";
-        const ruleGreet = allRules.find(r => (r.CHAVE || r.chave) === key) || allRules.find(r => (r.CHAVE || r.chave) === "GREET");
+        const ruleGreet = allRules.find(r => (r.CHAVE || r.chave) === key) || r3;
         if (ruleGreet) greetingText = buildHumanizedResponse(ruleGreet.reply || ruleGreet.RESPOSTA, getFirstName(fullName), getDayGreetingPt());
       }
 
       // 2. IA ANALISA INTENÇÃO
-      let aiResult = { id_table: "ERR", resposta: "", termo: "" };
+      let aiResult = { id_table: "ERR", resposta: "", termo: "", contexto: "" };
       try {
         let mod = require("../services/appAgenda");
-        const agendaParaIA = await mod.formatAgendaDepartamentosText_v1(await mod.getAgendaDepartamentos_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon" }));
+        // A IA recebe a agenda completa (onlyCurrentMonth: false) para ter todo o contexto da igreja
+        const payloadIA = await mod.getAgendaDepartamentos_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon", onlyCurrentMonth: false });
+        const agendaParaIA = mod.formatAgendaDepartamentosText_v1(payloadIA, "Europe/Lisbon");
         aiResult = await analisarComIA(bodyRaw, getFirstName(fullName), [], allRules, agendaParaIA);
       } catch (err) { aiResult = { id_table: "FALHA", resposta: "" }; }
 
       let finalReply = String(aiResult.resposta || "").trim();
       let usedIdTable = String(aiResult.id_table || "").trim();
       let processoReal = "";
+      let contextoReal = String(aiResult.contexto || "Nenhum").trim();
 
-      // 🛡️ CONTROLE DE DUPLICAÇÃO DE SAUDAÇÃO
-      if (usedIdTable === "SAUDACAO_DUPLA" || finalReply === "SAUDACAO_DUPLA") {
-          if (greetingText) { finalReply = ""; usedIdTable = "Bloqueio_Duplicado"; }
-          else { finalReply = "Olá! Como posso ajudar?"; usedIdTable = "Saudacao_IA"; }
+      // 🛡️ CONTROLE DE DUPLICAÇÃO
+      if (greetIds.includes(usedIdTable) || finalReply.includes("SAUDACAO_DUPLA")) {
+          if (greetingText) { 
+              finalReply = ""; usedIdTable = "Bloqueio_Duplicado"; contextoReal = "Sistema";
+          } else { 
+              const regraSecundaria = allRules.find(r => String(r.ID_TABLE || r.id_table) === usedIdTable);
+              if (regraSecundaria && regraSecundaria.reply) {
+                  finalReply = buildHumanizedResponse(regraSecundaria.reply, getFirstName(fullName), getDayGreetingPt());
+              } else { finalReply = "Olá! Como posso ajudar?"; }
+              usedIdTable = "Saudacao_IA"; contextoReal = "Sistema";
+          }
       }
 
-      // 3. IDENTIFICA PROCESSO
-      if (usedIdTable.startsWith("__APP_")) {
+      // 3. IDENTIFICA PROCESSO E CONTEXTO EXATO
+      if (usedIdTable.includes("APP_")) {
           processoReal = usedIdTable;
-      } else if (usedIdTable && usedIdTable !== "Bloqueio_Duplicado" && usedIdTable !== "IA_GENERICA" && usedIdTable !== "ERR") {
+          if (!processoReal.startsWith("__")) processoReal = "__" + processoReal;
+          if (!processoReal.endsWith("__")) processoReal = processoReal + "__";
+          contextoReal = "LIVRARIA";
+      } else if (usedIdTable && usedIdTable !== "Bloqueio_Duplicado" && usedIdTable !== "Saudacao_IA" && usedIdTable !== "IA_GENERICA" && usedIdTable !== "ERR") {
           const regra = allRules.find(r => String(r.ID_TABLE || r.id_table) === usedIdTable);
-          if (regra) processoReal = String(regra.PROCESSO || regra.processo || "").trim();
+          if (regra) {
+              processoReal = String(regra.PROCESSO || regra.processo || "").trim();
+              if (regra.CONTEXTO || regra.contexto) contextoReal = String(regra.CONTEXTO || regra.contexto).trim();
+          }
       }
 
-      // 🚨 OVERRIDE DE SEGURANÇA: Corrije a rota para Editora, Autor ou Pesquisa de Título
+      // 🚨 OVERRIDE DE SEGURANÇA LIVRARIA
       const msgLower = bodyRaw.toLowerCase();
       if (msgLower.includes("quais as editoras") || msgLower.includes("lista de editoras")) {
-          processoReal = "__APP_LIVRARIA_EDITORAS__";
+          processoReal = "__APP_LIVRARIA_EDITORAS__"; contextoReal = "LIVRARIA";
       } else if (msgLower.includes("quais os autores") || msgLower.includes("lista de autores")) {
-          processoReal = "__APP_LIVRARIA_AUTORES__";
+          processoReal = "__APP_LIVRARIA_AUTORES__"; contextoReal = "LIVRARIA";
       } else if ((msgLower.includes("editora") || msgLower.includes("editoras")) && aiResult.termo) {
-          processoReal = "__APP_LIVRARIA_FILTRO_EDITORA__";
+          processoReal = "__APP_LIVRARIA_FILTRO_EDITORA__"; contextoReal = "LIVRARIA";
       } else if ((msgLower.includes("autor") || msgLower.includes("autores")) && aiResult.termo) {
-          processoReal = "__APP_LIVRARIA_FILTRO_AUTOR__";
-      } else if (aiResult.termo && processoReal === "__APP_LIVRARIA__") {
-          // Se a IA devolver ID de Lista Geral mas extraiu um termo (ex: "fé"), converte em Pesquisa!
-          processoReal = "__APP_LIVRARIA_SEARCH__";
+          processoReal = "__APP_LIVRARIA_FILTRO_AUTOR__"; contextoReal = "LIVRARIA";
+      } else if (aiResult.termo && (!processoReal || processoReal === "__APP_LIVRARIA__" || processoReal.includes("SEARCH"))) {
+          processoReal = "__APP_LIVRARIA_SEARCH__"; contextoReal = "LIVRARIA";
       }
 
-      // Limpeza de texto anti-alucinação
+      // Limpeza de texto
       finalReply = finalReply.replace(/^\d+[\.\)].*$/gm, "").replace(/^[\s\t]*[\-\*•].*$/gm, "").replace(/\n\s*\n/g, '\n').trim();
 
       // 4. EXECUÇÃO DE PROCESSOS
@@ -112,6 +137,22 @@ function registerOnMessage_v5(client, cfg) {
               } else if (processoReal === "__AUSENCIAS__" || processoReal === "__APP_AUSENCIAS__") {
                   let mod = require("../services/appAusencias");
                   finalReply += "\n\n" + await mod.getMinhasAusencias_v1({ chatId, fullName });
+              } else if (processoReal === "__APP_AGENDA__" || processoReal === "__APP_AGENDA_FULL__") {
+                  // 🚨 AQUI ESTÁ A MAGIA DO INTERRUPTOR!
+                  let mod = require("../services/appAgenda");
+                  const isFull = (processoReal === "__APP_AGENDA_FULL__");
+                  
+                  const payload = await mod.getAgendaDepartamentos_v1({ 
+                      spreadsheetId: cfg.spreadsheetId, 
+                      sheetNameAgenda: cfg.sheetNameAgenda, 
+                      cacheSeconds: cfg.cacheAgendaSeconds, 
+                      timeZone: "Europe/Lisbon",
+                      onlyCurrentMonth: !isFull // Se não for FULL, acende o interruptor para barrar meses futuros!
+                  });
+                  
+                  const agendaText = mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
+                  if (agendaText) finalReply += "\n\n" + agendaText;
+                  
               } else if (processoReal.includes("__APP_LIVRARIA")) {
                   let mod = require("../services/appLivraria");
                   const sInfo = { spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4", sheetName: "DB_STOCK" };
@@ -152,6 +193,7 @@ function registerOnMessage_v5(client, cfg) {
       console.log(` > USUÁRIO: ${fullName || "Visitante"} | STATUS: ${isColab ? "🟢 Colab" : "⚪ Público"}`);
       console.log(` > DEPTOS: ${listaDepts}`);
       console.log(` > MENSAGEM: ${bodyRaw}`);
+      console.log(` > CONTEXTO: ${contextoReal}`);
       console.log(` > ID_TABLE: ${usedIdTable} | PROCESSO: ${processoReal || 'Nenhum'}`);
       console.log(` > TERMO_IA: ${termoImpresso}`);
       console.log("---------------------------------------------------------");

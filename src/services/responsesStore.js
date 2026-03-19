@@ -124,7 +124,7 @@ async function getRules(spreadsheetId, sheetNameResp, cacheSeconds) {
   if (!spreadsheetId) throw new Error("spreadsheetId indefinido");
   if (!sheetNameResp) throw new Error("sheetNameResp indefinido");
 
-  // LER desde A para incluir ID_TABLE
+  // LER desde A para incluir ID_TABLE e todas as colunas
   const values = await readRange(spreadsheetId, `'${sheetNameResp}'!A:ZZ`);
   if (!values || values.length < 2) {
     const empty = [];
@@ -144,6 +144,7 @@ async function getRules(spreadsheetId, sheetNameResp, cacheSeconds) {
   const idxResposta = findHeaderIndexByNorm_v1(header, "RESPOSTA");
   const idxProcesso = findHeaderIndexByNorm_v1(header, "PROCESSO");
   const idxDepartamento = findHeaderIndexByNorm_v1(header, "DEPARTAMENTO");
+  const idxContexto = findHeaderIndexByNorm_v1(header, "CONTEXTO"); // 🚨 AQUI MAPEAMOS O CONTEXTO
 
   // mínimos para funcionar
   if (idxMatchType < 0 || idxChave < 0 || idxResposta < 0) {
@@ -171,8 +172,9 @@ async function getRules(spreadsheetId, sheetNameResp, cacheSeconds) {
 
     const processo = idxProcesso >= 0 ? String(row[idxProcesso] ?? "").trim() : "";
     const departamento = idxDepartamento >= 0 ? String(row[idxDepartamento] ?? "").trim() : "";
+    const contexto = idxContexto >= 0 ? String(row[idxContexto] ?? "").trim() : ""; // 🚨 AQUI EXTRAÍMOS O CONTEXTO
 
-    // OBJETO com TODOS os aliases (não quebra router antigo nem novo)
+    // OBJETO com TODOS os aliases
     rules.push({
       // formato “novo” (muitos routers usam isto)
       matchType,
@@ -192,10 +194,13 @@ async function getRules(spreadsheetId, sheetNameResp, cacheSeconds) {
       access,
       prioridade,
 
-      // auditoria
+      // auditoria e contexto
       ID_TABLE: idTable,
       PROCESSO: processo,
       DEPARTAMENTO: departamento,
+      CONTEXTO: contexto, // 🚨 AQUI INSERIMOS NO OBJETO PARA A IA E PARA O ONMESSAGE
+      contexto: contexto,
+      
       __rowNum: r + 1,
     });
   }
