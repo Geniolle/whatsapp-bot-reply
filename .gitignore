@@ -9,7 +9,10 @@ session/
 # Chaves e Configurações sensíveis
 .env
 credentials/
+chave.key
 
 # Logs e arquivos temporários
 *.log
 npm-debug.log*
+
+
