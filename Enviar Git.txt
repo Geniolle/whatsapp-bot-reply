@@ -1,0 +1,39 @@
+##### ENVIAR AO GITHUB #####
+
+🚀 Passo 1: Ver o estado dos ficheiros
+git status
+
+🚀 Passo 2: Adicionar todas as alterações
+git add .
+
+🚀 Passo 3: Criar o "Pacote" (Commit) com uma mensagem
+git commit -m "Mensagem do commit"
+
+🚀 Passo 4: Enviar para a Nuvem (Push)
+git push
+
+(Nota: Se for a primeira vez que sobes esta branch ou se der algum erro a pedir a origem, podes usar
+git push origin main ou git push origin master, dependendo do nome da tua branch principal).
+
+
+
+##### ENVIAR AO SERVIDOR #####
+
+🚀 Passo 1: Aceder à pasta do projeto no servidor
+ssh -i chave.key ubuntu@132.145.57.133
+cd whatsapp-bot-reply
+
+🚀 Passo 2: Descarregar as atualizações do GitHub
+git pull
+
+(Se ele perguntar origin main ou origin master, escreve: git pull origin main). 
+O servidor vai mostrar uma mensagem a dizer que transferiu os ficheiros e que fez o merge.
+
+🚀 Passo 3: Atualizar as dependências (Por precaução)
+npm install
+
+🚀 Passo 4: Reiniciar o Bot para aplicar as mudanças
+pm2 restart all
+
+🚀 Passo 5: Para veres os logs e confirmares que reiniciou bem
+pm2 logs
