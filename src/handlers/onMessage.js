@@ -6,6 +6,7 @@
 const { getRules, buildHumanizedResponse } = require("../services/responsesStore");
 const { getAccessByChatId } = require("../services/bpLookup");
 const { analisarComIA } = require("../services/aiAssistant");
+const billing = require("../services/appBilling"); // 💰 Importado para faturação
 
 const FALLBACK_DEFAULT = "Ups, a minha ligação falhou por um instante.";
 
@@ -21,6 +22,46 @@ function getFirstName(fullName) {
 }
 
 const greeted = new Set();
+
+// ==================================================================================
+// 🛡️ SISTEMA ANTI-SPAM (Rate Limiting / Prevenção EDoS)
+// ==================================================================================
+const spamMonitor = new Map();
+const SPAM_LIMIT = 10; // Máximo de mensagens permitidas
+const SPAM_WINDOW_MS = 60 * 1000; // Num intervalo de 1 minuto
+const BLOCK_DURATION_MS = 5 * 60 * 1000; // Tempo de castigo (5 minutos)
+
+function isSpamming(chatId) {
+    const now = Date.now();
+    const user = spamMonitor.get(chatId);
+
+    if (!user) {
+        spamMonitor.set(chatId, { count: 1, startTime: now, blockedUntil: 0 });
+        return false;
+    }
+
+    // Se o utilizador está no período de castigo, bloqueia imediatamente
+    if (now < user.blockedUntil) return true;
+
+    // Se já passou 1 minuto desde a primeira mensagem, reinicia a contagem
+    if (now - user.startTime > SPAM_WINDOW_MS) {
+        user.count = 1;
+        user.startTime = now;
+        return false;
+    }
+
+    user.count++;
+
+    // Se ultrapassou o limite dentro de 1 minuto, aplica o castigo!
+    if (user.count > SPAM_LIMIT) {
+        user.blockedUntil = now + BLOCK_DURATION_MS;
+        console.warn(`[ANTI-SPAM] 🚨 O número ${chatId} foi bloqueado por ${BLOCK_DURATION_MS / 60000} minutos devido a excesso de mensagens.`);
+        return true;
+    }
+
+    return false;
+}
+// ==================================================================================
 
 async function simulateTyping(client, chatId, delayMs = 1500) {
   try {
@@ -38,6 +79,11 @@ function registerOnMessage_v5(client, cfg) {
     const chatId = contact.id._serialized;
     const bodyRaw = (message.body || "").trim();
     if (!bodyRaw) return;
+
+    // 🛡️ ESCUDO ANTI-SPAM ATIVADO AQUI
+    if (isSpamming(chatId)) {
+        return; 
+    }
 
     try {
       const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, cfg.cacheSeconds);
@@ -109,9 +155,9 @@ function registerOnMessage_v5(client, cfg) {
           }
       }
 
-      // 🚨 OVERRIDE DE SEGURANÇA LIVRARIA E ADMIN
+      // 🚨 OVERRIDE DE SEGURANÇA LIVRARIA E ADMIN (Adicionado "saldo")
       const msgLower = bodyRaw.toLowerCase();
-      if (msgLower === "testar sistema" || msgLower === "task list") {
+      if (msgLower === "testar sistema" || msgLower === "task list" || msgLower === "saldo" || msgLower === "/saldo") {
           processoReal = "ADMIN"; contextoReal = "SISTEMA"; 
       } else if (msgLower.includes("quais as editoras") || msgLower.includes("lista de editoras")) {
           processoReal = "__APP_LIVRARIA_EDITORAS__"; contextoReal = "LIVRARIA";
@@ -131,83 +177,77 @@ function registerOnMessage_v5(client, cfg) {
       if (processoReal) {
           const termoExtraido = (aiResult.termo || bodyRaw).trim();
           
-          // ==========================================
-          // 🛡️ NOVO: SIMULADOR TASK LIST ADMINISTRADOR
-          // ==========================================
           if (processoReal === "ADMIN" || processoReal === "ADMIM" || processoReal === "__ADMIN_TEST__") {
               const adminId = String(process.env.ADMIN_CHAT_ID || "").trim();
 
               if (chatId !== adminId) {
                   finalReply = "⛔ *Acesso Negado:* Este comando é restrito ao Administrador.";
               } else {
-                  await client.sendMessage(chatId, "⚙️ *MODO DE TESTE ATIVADO* ⚙️\nVou simular as respostas da sheet [RESPONSES] onde a PRIORIDADE é maior que 0.\n\n_(Aguarde, enviarei com pausas para evitar bloqueios do WhatsApp)_");
+                  // --- SUB-PROCESSO: SALDO OPENAI (Injetado aqui) ---
+                  if (msgLower === "saldo" || msgLower === "/saldo") {
+                      finalReply = await billing.getOpenAISaldo_v1({ spreadsheetId: cfg.spreadsheetId });
+                  } 
+                  // --- SUB-PROCESSO: TASK LIST ---
+                  else if (msgLower === "task list" || msgLower === "testar sistema") {
+                      await client.sendMessage(chatId, "⚙️ *MODO DE TESTE ATIVADO* ⚙️\nVou simular as respostas da sheet [RESPONSES] onde a PRIORIDADE é maior que 0.\n\n_(Aguarde, enviarei com pausas para evitar bloqueios do WhatsApp)_");
 
-                  // Filtra prioridade > 0 e ordena pelo ID_TABLE
-                  const regrasParaTestar = allRules.filter(r => {
-                      const prio = Number(r.PRIORIDADE || r.prioridade || 0);
-                      return !isNaN(prio) && prio > 0;
-                  }).sort((a, b) => Number(a.ID_TABLE || a.id_table || 0) - Number(b.ID_TABLE || b.id_table || 0));
+                      const regrasParaTestar = allRules.filter(r => {
+                          const prio = Number(r.PRIORIDADE || r.prioridade || 0);
+                          return !isNaN(prio) && prio > 0;
+                      }).sort((a, b) => Number(a.ID_TABLE || a.id_table || 0) - Number(b.ID_TABLE || b.id_table || 0));
 
-                  if (regrasParaTestar.length === 0) {
-                      await client.sendMessage(chatId, "🤷‍♂️ Não encontrei nenhuma regra com a coluna PRIORIDADE configurada maior que zero.");
-                      return; // Sai do fluxo para não continuar
-                  }
-
-                  for (const regra of regrasParaTestar) {
-                      const idTable = regra.ID_TABLE || regra.id_table || "?";
-                      const chave = String(regra.CHAVE || regra.chave || "(Sem Pergunta)").trim();
-                      const proc = String(regra.PROCESSO || regra.processo || "").trim();
-                      const repBase = String(regra.REPLY || regra.reply || regra.RESPOSTA || regra.resposta || "").trim();
-
-                      let resParcial = repBase;
-
-                      // Simula a execução do processo se houver algum configurado na linha
-                      if (proc) {
-                          try {
-                              if (proc === "__APP_ENSAIO__") {
-                                  const modEnsaio = require("../services/appEnsaio");
-                                  if (typeof modEnsaio.appEnsaio === "function") resParcial = await modEnsaio.appEnsaio({ pushname: "Admin" });
-                                  else {
-                                      const out = await modEnsaio.getLatestEnsaio_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameEnsaio: cfg.sheetNameEnsaio });
-                                      resParcial = out && out.DATA ? `[Simulação] Ensaio: *${out.DATA}* às *${out.HORARIO}*` : "[Simulação] Sem dados de ensaio.";
-                                  }
-                              } else if (proc === "__AUSENCIAS__" || proc === "__APP_AUSENCIAS__") {
-                                  const modAusencias = require("../services/appAusencias");
-                                  resParcial = await modAusencias.getMinhasAusencias_v1({ chatId, fullName: "Admin" });
-                              } else if (proc === "__APP_AGENDA__" || proc === "__APP_AGENDA_FULL__") {
-                                  const modAgenda = require("../services/appAgenda");
-                                  const payload = await modAgenda.getAgendaDepartamentos_v1({
-                                      spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda,
-                                      cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon", onlyCurrentMonth: proc !== "__APP_AGENDA_FULL__"
-                                  });
-                                  resParcial = modAgenda.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
-                              } else if (proc.includes("__APP_LIVRARIA")) {
-                                  const modLivraria = require("../services/appLivraria");
-                                  const sInfo = { spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4", sheetName: "DB_STOCK" };
-                                  if (proc === "__APP_LIVRARIA__") resParcial = await modLivraria.getLivrosEmStock_v1({ ...sInfo, searchTerm: "" });
-                                  else if (proc === "__APP_LIVRARIA_AUTORES__") resParcial = await modLivraria.getListasLivraria_v1({ ...sInfo, tipo: "AUTORES" });
-                                  else if (proc === "__APP_LIVRARIA_EDITORAS__") resParcial = await modLivraria.getListasLivraria_v1({ ...sInfo, tipo: "EDITORAS" });
-                              }
-                          } catch (e) {
-                              resParcial = `❌ [Erro a simular processo ${proc}]: ${e.message}`;
-                          }
+                      if (regrasParaTestar.length === 0) {
+                          await client.sendMessage(chatId, "🤷‍♂️ Não encontrei nenhuma regra com a coluna PRIORIDADE configurada maior que zero.");
+                          return;
                       }
 
-                      if (!resParcial) resParcial = "⚠️ _(Nenhum texto de resposta ou processo associado configurado)_";
+                      for (const regra of regrasParaTestar) {
+                          const idTable = regra.ID_TABLE || regra.id_table || "?";
+                          const chave = String(regra.CHAVE || regra.chave || "(Sem Pergunta)").trim();
+                          const proc = String(regra.PROCESSO || regra.processo || "").trim();
+                          const repBase = String(regra.REPLY || regra.reply || regra.RESPOSTA || regra.resposta || "").trim();
 
-                      // Monta a bolha visual estilo "Task List"
-                      const testMsg = `📝 *[ID: ${idTable}]*\n🗣️ *Pergunta:* "${chave}"\n🤖 *Bot responde:*\n${resParcial}`;
+                          let resParcial = repBase;
 
-                      await simulateTyping(client, chatId, 1500);
-                      await client.sendMessage(chatId, testMsg);
-
-                      // Pausa estratégica de 3 segundos para evitar ser detetado como bot de spam
-                      await new Promise(resolve => setTimeout(resolve, 3000));
+                          if (proc) {
+                              try {
+                                  if (proc === "__APP_ENSAIO__") {
+                                      const modEnsaio = require("../services/appEnsaio");
+                                      if (typeof modEnsaio.appEnsaio === "function") resParcial = await modEnsaio.appEnsaio({ pushname: "Admin" });
+                                      else {
+                                          const out = await modEnsaio.getLatestEnsaio_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameEnsaio: cfg.sheetNameEnsaio });
+                                          resParcial = out && out.DATA ? `[Simulação] Ensaio: *${out.DATA}* às *${out.HORARIO}*` : "[Simulação] Sem dados de ensaio.";
+                                      }
+                                  } else if (proc === "__AUSENCIAS__" || proc === "__APP_AUSENCIAS__") {
+                                      const modAusencias = require("../services/appAusencias");
+                                      resParcial = await modAusencias.getMinhasAusencias_v1({ chatId, fullName: "Admin" });
+                                  } else if (proc === "__APP_AGENDA__" || proc === "__APP_AGENDA_FULL__") {
+                                      const modAgenda = require("../services/appAgenda");
+                                      const payload = await modAgenda.getAgendaDepartamentos_v1({
+                                          spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda,
+                                          cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon", onlyCurrentMonth: proc !== "__APP_AGENDA_FULL__"
+                                      });
+                                      resParcial = modAgenda.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
+                                  } else if (proc.includes("__APP_LIVRARIA")) {
+                                      const modLivraria = require("../services/appLivraria");
+                                      const sInfo = { spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4", sheetName: "DB_STOCK" };
+                                      if (proc === "__APP_LIVRARIA__") resParcial = await modLivraria.getLivrosEmStock_v1({ ...sInfo, searchTerm: "" });
+                                      else if (proc === "__APP_LIVRARIA_AUTORES__") resParcial = await modLivraria.getListasLivraria_v1({ ...sInfo, tipo: "AUTORES" });
+                                      else if (proc === "__APP_LIVRARIA_EDITORAS__") resParcial = await modLivraria.getListasLivraria_v1({ ...sInfo, tipo: "EDITORAS" });
+                                  }
+                              } catch (e) {
+                                  resParcial = `❌ [Erro a simular processo ${proc}]: ${e.message}`;
+                              }
+                          }
+                          const testMsg = `📝 *[ID: ${idTable}]*\n🗣️ *Pergunta:* "${chave}"\n🤖 *Bot responde:*\n${resParcial}`;
+                          await simulateTyping(client, chatId, 1500);
+                          await client.sendMessage(chatId, testMsg);
+                          await new Promise(resolve => setTimeout(resolve, 3000));
+                      }
+                      await simulateTyping(client, chatId, 1000);
+                      await client.sendMessage(chatId, "✅ *Task List Finalizada!*");
+                      return;
                   }
-
-                  await simulateTyping(client, chatId, 1000);
-                  await client.sendMessage(chatId, "✅ *Task List Finalizada!* Todos os testes foram concluídos com sucesso.");
-                  return; // Importantíssimo: Para o código aqui para não enviar mais mensagens lá em baixo
               }
           }
           // ==========================================
@@ -262,6 +302,10 @@ function registerOnMessage_v5(client, cfg) {
                   await simulateTyping(client, chatId, 1000);
                   await client.sendMessage(chatId, bolha.trim());
               }
+          }
+          // 💰 REGISTO DE GASTO (Injetado aqui: Só se a resposta veio da IA)
+          if (!["ADMIN", "Bloqueio_Duplicado", "FALHA", "ERR"].includes(usedIdTable)) {
+              await billing.registrarGasto_v1({ spreadsheetId: cfg.spreadsheetId, chatId, mensagem: bodyRaw });
           }
       } else if (greetingText && usedIdTable === "Bloqueio_Duplicado") {
           await client.sendMessage(chatId, greetingText);
