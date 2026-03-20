@@ -16,20 +16,13 @@ function findHeaderIndex_v1(headers, wanted) {
 }
 
 function parsePtDate_v1(v) {
-  // aceita:
-  // - Date
-  // - número (timestamp / serial não garantido)
-  // - "DD/MM/YYYY" (opcional " HH:MM")
   if (v instanceof Date && !isNaN(v.getTime())) return v;
 
   if (typeof v === "number") {
-    // Heurística: se parece timestamp em ms
     if (v > 10_000_000_000) {
       const d = new Date(v);
       return isNaN(d.getTime()) ? null : d;
     }
-    // Se vier como "serial" (Sheets), é difícil garantir sem timezone/base.
-    // Tentamos tratar como dias desde 1899-12-30 (comum em Sheets/Excel).
     if (v > 1000 && v < 100000) {
       const base = new Date(Date.UTC(1899, 11, 30));
       const d = new Date(base.getTime() + v * 24 * 60 * 60 * 1000);
@@ -41,7 +34,6 @@ function parsePtDate_v1(v) {
   const s = String(v || "").trim();
   if (!s) return null;
 
-  // DD/MM/YYYY ...
   const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
   if (m) {
     const dd = Number(m[1]);
@@ -53,7 +45,6 @@ function parsePtDate_v1(v) {
     return isNaN(d.getTime()) ? null : d;
   }
 
-  // fallback ISO parse
   const d2 = new Date(s);
   return isNaN(d2.getTime()) ? null : d2;
 }
@@ -78,8 +69,8 @@ async function getLatestEnsaio_v1({ spreadsheetId, sheetNameEnsaio }) {
 
   const header = values[0] || [];
   const idxEnsaio = findHeaderIndex_v1(header, ["ENSAIO", "DATA", "DATA_ENSAIO", "DATA ENSAIO"]);
-  const idxHorario = findHeaderIndex_v1(header, ["HORARIO", "HORÁRIO", "HORA", "HORÁRIO"]);
-  const idxResp = findHeaderIndex_v1(header, ["RESPONSÁVEL", "RESPONSAVEL", "RESPONSAVEL", "RESP", "RESPONSAVEL_ENSAIO"]);
+  const idxHorario = findHeaderIndex_v1(header, ["HORARIO", "HORÁRIO", "HORA", "HORÁRIO"]);
+  const idxResp = findHeaderIndex_v1(header, ["RESPONSÁVEL", "RESPONSAVEL", "RESP", "RESPONSAVEL_ENSAIO"]);
 
   if (idxEnsaio < 0) {
     throw new Error(`[APP_ENSAIO] Coluna 'ENSAIO' não encontrada em ${sheetNameEnsaio}.`);
@@ -112,4 +103,52 @@ async function getLatestEnsaio_v1({ spreadsheetId, sheetNameEnsaio }) {
   };
 }
 
-module.exports = { getLatestEnsaio_v1 };
+//###################################################################################
+// FUNÇÃO PRINCIPAL: Processar e Humanizar a Resposta do Bot
+//###################################################################################
+async function appEnsaio(msg) {
+  try {
+    // ATENÇÃO: Substitui pelas variáveis do teu projeto (ex: process.env.SPREADSHEET_ID)
+    const spreadsheetId = process.env.SPREADSHEET_ID; // Define o ID da folha de cálculo
+    const sheetNameEnsaio = "APP_ENSAIO"; // Nome exato do separador/aba
+
+    // 1. Humanização: Extrair o primeiro nome do utilizador
+    const fullName = msg.pushname || "amigo(a)";
+    const firstName = fullName.split(" ")[0];
+
+    // 2. Saudação baseada na hora atual
+    const hour = new Date().getHours();
+    let greeting = "Olá";
+    if (hour < 12) greeting = "Bom dia";
+    else if (hour < 20) greeting = "Boa tarde";
+    else greeting = "Boa noite";
+
+    // 3. Obter os dados da folha de cálculo
+    const info = await getLatestEnsaio_v1({ spreadsheetId, sheetNameEnsaio });
+
+    // 4. Se não existirem ensaios marcados (Evita que o bot não responda nada)
+    if (!info) {
+      return `${greeting}, ${firstName}! Fui verificar à agenda e, por enquanto, não encontrei nenhum ensaio marcado. Assim que houver novidades, aviso-te! 😉`;
+    }
+
+    // 5. Múltiplas respostas humanizadas (o bot escolhe uma à sorte para não ser repetitivo)
+    const templates = [
+      `${greeting}, ${firstName}! O nosso próximo ensaio será no dia *${info.ENSAIO}* às *${info.HORARIO}*. ${info["RESPONSÁVEL"] ? `O responsável será: ${info["RESPONSÁVEL"]}.` : ""} Contamos contigo! 🎤`,
+      `Ora viva, ${firstName}! Aponta aí: o próximo ensaio está marcado para o dia *${info.ENSAIO}* às *${info.HORARIO}*. 🎸`,
+      `${firstName}, só para avisar que o próximo ensaio é a *${info.ENSAIO}* (às ${info.HORARIO}). Prepara-te! 😊`
+    ];
+
+    return templates[Math.floor(Math.random() * templates.length)];
+
+  } catch (error) {
+    console.error("[ERRO CRÍTICO APP_ENSAIO]:", error);
+    
+    // 6. Fallback caso haja um erro de sistema (O utilizador nunca fica sem resposta)
+    return "Ups! Tive um pequeno problema técnico ao consultar a agenda neste momento. 😅 Podes tentar perguntar novamente daqui a pouco?";
+  }
+}
+
+module.exports = { 
+  getLatestEnsaio_v1,
+  appEnsaio 
+};

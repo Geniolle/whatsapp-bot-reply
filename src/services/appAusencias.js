@@ -1,3 +1,4 @@
+// src/services/appAusencias.js
 "use strict";
 
 const { readRange } = require("./sheets");
@@ -81,8 +82,6 @@ function todayMidnight_v1() {
 
 //###################################################################################
 // Public: buscar ausências por FullName
-// Colunas esperadas:
-// [DATA INÍCIO, DATA FIM, NOME DO COLABORADOR, MOTIVO DA AUSÊNCIA]
 //###################################################################################
 async function getAusenciasByFullName_v1({
   spreadsheetId,
@@ -153,6 +152,68 @@ async function getAusenciasByFullName_v1({
 }
 
 //###################################################################################
+// FUNÇÃO DE FORMATAÇÃO E RESPOSTA PARA O BOT (A que faltava!)
+//###################################################################################
+async function getMinhasAusencias_v1({ chatId, fullName }) {
+  try {
+    // 1. Variáveis da Google Sheet
+    const spreadsheetId = process.env.SPREADSHEET_ID; 
+    
+    // IMPORTANTE: Assim como no ensaio, certifica-te de que o nome aqui corresponde
+    // EXATAMENTE ao nome da aba de Ausências no teu Google Sheets.
+    const sheetNameAusencias = process.env.SHEET_NAME_AUSENCIAS || "Ausencias"; 
+
+    if (!fullName) {
+      return "Não consegui identificar o teu nome na base de dados para consultar as ausências. 😔";
+    }
+
+    // 2. Procura na folha
+    const data = await getAusenciasByFullName_v1({ spreadsheetId, sheetNameAusencias, fullName });
+
+    const upcoming = Array.isArray(data?.upcoming) ? data.upcoming : [];
+    const last = data?.last || null;
+
+    // 3. Verifica se tem registos
+    if (!upcoming.length && !last) {
+      return "Fui verificar à agenda e não encontrei férias ou ausências registadas no teu nome. Se precisares de agendar alguma, fala com a liderança! 😉";
+    }
+
+    // 4. Formata a resposta
+    const lines = [];
+    
+    // Ausências futuras
+    if (upcoming.length) {
+      lines.push("📅 *As tuas próximas férias/ausências:*");
+      for (const x of upcoming) {
+        const ini = x?.ini || ""; 
+        const fim = x?.fim || ""; 
+        const motivo = x?.motivo ? ` — ${x.motivo}` : "";
+        lines.push(`- ${fim ? `${ini} a ${fim}` : ini}${motivo}`);
+      }
+    } else { 
+      lines.push("Não encontrei férias ou ausências futuras marcadas para ti."); 
+    }
+    
+    // Última ausência registada (passado)
+    if (last) {
+      const ini = last?.ini || ""; 
+      const fim = last?.fim || ""; 
+      const motivo = last?.motivo ? ` — ${last.motivo}` : "";
+      lines.push(`\n🕒 *Última ausência registada:* \n${fim ? `${ini} a ${fim}` : ini}${motivo}`);
+    }
+
+    return lines.join("\n");
+
+  } catch (error) {
+    console.error("[ERRO APP_AUSENCIAS getMinhasAusencias_v1]:", error);
+    return "Poxa, tive um pequeno problema técnico ao consultar o teu registo de ausências agora. 😅 Podes tentar novamente daqui a pouco?";
+  }
+}
+
+//###################################################################################
 // Exports
 //###################################################################################
-module.exports = { getAusenciasByFullName_v1 };
+module.exports = { 
+  getAusenciasByFullName_v1,
+  getMinhasAusencias_v1 // Exportamos a função que o onMessage.js precisa
+};
