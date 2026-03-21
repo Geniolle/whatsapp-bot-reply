@@ -125,7 +125,7 @@ function registerOnMessage_v5(client, cfg) {
 
       let finalReply = String(aiResult.resposta || "").trim();
       let usedIdTable = String(aiResult.id_table || "").trim();
-      let processoReal = "";
+      let processoReal = String(aiResult.processo || "").trim(); // GARANTIDO A CAPTURA DO PROCESSO DA IA
       let contextoReal = String(aiResult.contexto || "Nenhum").trim();
 
       // 🛡️ CONTROLE DE DUPLICAÇÃO
@@ -150,7 +150,7 @@ function registerOnMessage_v5(client, cfg) {
       } else if (usedIdTable && usedIdTable !== "Bloqueio_Duplicado" && usedIdTable !== "Saudacao_IA" && usedIdTable !== "IA_GENERICA" && usedIdTable !== "ERR") {
           const regra = allRules.find(r => String(r.ID_TABLE || r.id_table) === usedIdTable);
           if (regra) {
-              processoReal = String(regra.PROCESSO || regra.processo || "").trim();
+              if (!processoReal) processoReal = String(regra.PROCESSO || regra.processo || "").trim();
               if (regra.CONTEXTO || regra.contexto) contextoReal = String(regra.CONTEXTO || regra.contexto).trim();
           }
       }
@@ -167,7 +167,8 @@ function registerOnMessage_v5(client, cfg) {
           processoReal = "__APP_LIVRARIA_FILTRO_EDITORA__"; contextoReal = "LIVRARIA";
       } else if ((msgLower.includes("autor") || msgLower.includes("autores")) && aiResult.termo) {
           processoReal = "__APP_LIVRARIA_FILTRO_AUTOR__"; contextoReal = "LIVRARIA";
-      } else if (aiResult.termo && (!processoReal || processoReal === "__APP_LIVRARIA__" || processoReal.includes("SEARCH"))) {
+      } else if (aiResult.termo && processoReal !== "SEARCH_GOOGLE_PLACES" && (!processoReal || processoReal === "__APP_LIVRARIA__" || processoReal.includes("SEARCH"))) {
+          // 🛡️ CORREÇÃO: "SEARCH_GOOGLE_PLACES" agora está imune ao sequestro da Livraria!
           processoReal = "__APP_LIVRARIA_SEARCH__"; contextoReal = "LIVRARIA";
       }
 
@@ -253,7 +254,6 @@ function registerOnMessage_v5(client, cfg) {
           else {
               try {
                   if (processoReal === "__APP_ENSAIO__") {
-                      // 🚨 CORREÇÃO FEITA AQUI: Agora usamos as funções corretas de appEnsaio.js
                       let mod = require("../services/appEnsaio");
                       if (typeof mod.appEnsaio === "function") {
                           finalReply = await mod.appEnsaio({ pushname: fullName });
@@ -276,7 +276,32 @@ function registerOnMessage_v5(client, cfg) {
                       });
                       const agendaText = mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
                       if (agendaText) finalReply += "\n\n" + agendaText;
-                  } else if (processoReal.includes("__APP_LIVRARIA")) {
+                  } 
+                  // 🚀 MÓDULO GOOGLE PLACES ADICIONADO AQUI!
+                  else if (processoReal === "SEARCH_GOOGLE_PLACES") {
+                      if (!process.env.GOOGLE_PLACES_KEY) {
+                          finalReply = "Pedimos desculpa, mas o meu módulo de Guia de Braga não está configurado corretamente no servidor (falta a Google Key no ficheiro .env).";
+                      } else {
+                          const loadingMsg = `Olá ${getFirstName(fullName)}! Como pediu, vou procurar no Google Maps as melhores opções de *${termoExtraido}* aqui perto da igreja:\n\n_(Aguarde um momento, estou a ir buscar as moradas e horários reais...)_`;
+                          await simulateTyping(client, chatId, 1000);
+                          await client.sendMessage(chatId, loadingMsg);
+                          finalReply = ""; // Limpa a reposta para não enviar o loading em duplicado
+
+                          const placesMod = require("../services/googlePlaces");
+                          const moradaIgreja = "Praceta Beato Inácio de Azevedo, 7, Braga";
+                          
+                          const placesText = await placesMod.getNearbyPlacesFormated_v1({
+                              apiKey: process.env.GOOGLE_PLACES_KEY,
+                              centralAddress: moradaIgreja,
+                              searchTerm: termoExtraido,
+                              maxResults: 4
+                          });
+
+                          if (placesText) finalReply = placesText;
+                          else finalReply = `Não consegui encontrar locais de *${termoExtraido}* perto da igreja no Google Maps neste momento.`;
+                      }
+                  }
+                  else if (processoReal.includes("__APP_LIVRARIA")) {
                       let mod = require("../services/appLivraria");
                       const sInfo = { spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4", sheetName: "DB_STOCK" };
                       let res = "";

@@ -1,5 +1,5 @@
 //###################################################################################
-// src/services/aiAssistant.js - VERSÃO COM GUIA DE BRAGA PROFISSIONAL
+// src/services/aiAssistant.js - VERSÃO CLASSIFICADORA PARA GOOGLE PLACES
 //###################################################################################
 "use strict";
 const { OpenAI } = require("openai");
@@ -27,15 +27,10 @@ REGRAS RÍGIDAS DE CLASSIFICAÇÃO:
    - Igreja/Departamentos: Olhe APENAS para regras de CONTEXTO "DEPARTAMENTOS" ou "IGREJA".
 3. PERGUNTAS DA PLANILHA (FAQ): Use o "TEXTO_BASE" para a resposta. NUNCA inicie com saudações.
 4. LISTAS GERAIS E LIVROS: Siga estritamente os IDs numéricos e NUNCA invente títulos de livros no texto.
-5. ASSUNTOS EXTERNOS (Braga / Guia Local): Se o usuário perguntar por restaurantes, cafés, hotéis ou dicas da cidade, atue como um guia local experiente. 
-   - 📍 IMPORTANTE: A Igreja fica na Praceta Beato Inácio de Azevedo, 7, São Vicente, Braga.
-   - Recomende APENAS estabelecimentos REAIS e verdadeiros em Braga. NUNCA invente nomes.
-   - OBRIGATÓRIO FORMATAR COMO UM GUIA PROFISSIONAL. Para cada local, use este formato exato:
-     🍽️ *[Nome do Local]*
-     📍 Morada: [Rua e Zona exata em Braga]
-     🚶 Distância: [Estimativa a pé ou de carro a partir da igreja em São Vicente]
-     💡 Detalhe: [Tipo de comida, especialidade ou dica do local]
-   - Retorne "id_table": "IA_GENERICA", "contexto": "GUIA" e coloque o texto na "resposta".
+5. ASSUNTOS EXTERNOS (Braga / Guia Local): Se o usuário perguntar por restaurantes, cafés, hotéis, farmácias, passeios ou dicas da cidade, atue como um classificador de pesquisa.
+   - 📍 IMPORTANTE: NÃO dê as sugestões diretamente aqui. O sistema usará o Google Maps.
+   - EXTRAIA o tipo de local que o usuário quer e coloque no campo "termo" (ex: "restaurante", "café", "pizzaria", "parque").
+   - Retorne obrigatoriamente "id_table": "IA_GENERICA", "contexto": "GUIA", "processo": "SEARCH_GOOGLE_PLACES" e "resposta": "OK".
 
 BASE DE CONHECIMENTO:
 ${regrasFormatadas}
@@ -44,7 +39,8 @@ FORMATO JSON:
 {
   "id_table": "NÚMERO DO ID (ou IA_GENERICA)",
   "contexto": "O CONTEXTO",
-  "termo": "Palavra-chave (ou vazio)",
+  "processo": "O PROCESSO (ou SEARCH_GOOGLE_PLACES para guias)",
+  "termo": "O Tipo de local extraído da pergunta (ex: restaurante)",
   "resposta": "Sua resposta"
 }`;
 
@@ -56,7 +52,7 @@ FORMATO JSON:
         { role: "user", content: mensagemUsuario }
       ],
       response_format: { type: "json_object" },
-      temperature: 0.3 // Temperatura ideal para ser simpática mas aterrada à realidade
+      temperature: 0.1 // Temperatura baixa para não inventar nada, apenas extrair o termo
     });
 
     return JSON.parse(response.choices[0].message.content);
