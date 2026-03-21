@@ -72,9 +72,16 @@ async function simulateTyping(client, chatId, delayMs = 1500) {
 }
 
 function registerOnMessage_v5(client, cfg) {
-  client.on("message_create", async (message) => {
-    if (message.fromMe) return;
+  // 🚨 CORREÇÃO AQUI: Mudámos de "message_create" para "message"
+  client.on("message", async (message) => {
     
+    // Ignora mensagens que o próprio bot enviou e respostas a Status/Stories
+    if (message.fromMe || message.isStatus) return;
+    
+    // Ignora mensagens de Grupos (responde só no privado)
+    const chat = await message.getChat();
+    if (chat.isGroup) return;
+
     const contact = await message.getContact();
     const chatId = contact.id._serialized;
     const bodyRaw = (message.body || "").trim();
@@ -171,7 +178,10 @@ function registerOnMessage_v5(client, cfg) {
           processoReal = "__APP_LIVRARIA_SEARCH__"; contextoReal = "LIVRARIA";
       }
 
-      finalReply = finalReply.replace(/^\d+[\.\)].*$/gm, "").replace(/^[\s\t]*[\-\*•].*$/gm, "").replace(/\n\s*\n/g, '\n').trim();
+      // 🚨 LIMPEZA ANTI-ALUCINAÇÃO (APENAS PARA LIVRARIA)
+      if (contextoReal === "LIVRARIA") {
+          finalReply = finalReply.replace(/^\d+[\.\)].*$/gm, "").replace(/^[\s\t]*[\-\*•].*$/gm, "").replace(/\n\s*\n/g, '\n').trim();
+      }
 
       // 4. EXECUÇÃO DE PROCESSOS
       if (processoReal) {
