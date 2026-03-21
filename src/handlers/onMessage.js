@@ -40,10 +40,8 @@ function isSpamming(chatId) {
         return false;
     }
 
-    // Se o utilizador está no período de castigo, bloqueia imediatamente
     if (now < user.blockedUntil) return true;
 
-    // Se já passou 1 minuto desde a primeira mensagem, reinicia a contagem
     if (now - user.startTime > SPAM_WINDOW_MS) {
         user.count = 1;
         user.startTime = now;
@@ -52,7 +50,6 @@ function isSpamming(chatId) {
 
     user.count++;
 
-    // Se ultrapassou o limite dentro de 1 minuto, aplica o castigo!
     if (user.count > SPAM_LIMIT) {
         user.blockedUntil = now + BLOCK_DURATION_MS;
         console.warn(`[ANTI-SPAM] 🚨 O número ${chatId} foi bloqueado por ${BLOCK_DURATION_MS / 60000} minutos devido a excesso de mensagens.`);
@@ -72,13 +69,10 @@ async function simulateTyping(client, chatId, delayMs = 1500) {
 }
 
 function registerOnMessage_v5(client, cfg) {
-  // 🚨 CORREÇÃO AQUI: Mudámos de "message_create" para "message"
   client.on("message", async (message) => {
     
-    // Ignora mensagens que o próprio bot enviou e respostas a Status/Stories
     if (message.fromMe || message.isStatus) return;
     
-    // Ignora mensagens de Grupos (responde só no privado)
     const chat = await message.getChat();
     if (chat.isGroup) return;
 
@@ -87,7 +81,6 @@ function registerOnMessage_v5(client, cfg) {
     const bodyRaw = (message.body || "").trim();
     if (!bodyRaw) return;
 
-    // 🛡️ ESCUDO ANTI-SPAM ATIVADO AQUI
     if (isSpamming(chatId)) {
         return; 
     }
@@ -162,7 +155,7 @@ function registerOnMessage_v5(client, cfg) {
           }
       }
 
-      // 🚨 OVERRIDE DE SEGURANÇA LIVRARIA E ADMIN (Adicionado "saldo")
+      // 🚨 OVERRIDE DE SEGURANÇA LIVRARIA E ADMIN
       const msgLower = bodyRaw.toLowerCase();
       if (msgLower === "testar sistema" || msgLower === "task list" || msgLower === "saldo" || msgLower === "/saldo") {
           processoReal = "ADMIN"; contextoReal = "SISTEMA"; 
@@ -178,7 +171,6 @@ function registerOnMessage_v5(client, cfg) {
           processoReal = "__APP_LIVRARIA_SEARCH__"; contextoReal = "LIVRARIA";
       }
 
-      // 🚨 LIMPEZA ANTI-ALUCINAÇÃO (APENAS PARA LIVRARIA)
       if (contextoReal === "LIVRARIA") {
           finalReply = finalReply.replace(/^\d+[\.\)].*$/gm, "").replace(/^[\s\t]*[\-\*•].*$/gm, "").replace(/\n\s*\n/g, '\n').trim();
       }
@@ -193,11 +185,9 @@ function registerOnMessage_v5(client, cfg) {
               if (chatId !== adminId) {
                   finalReply = "⛔ *Acesso Negado:* Este comando é restrito ao Administrador.";
               } else {
-                  // --- SUB-PROCESSO: SALDO OPENAI (Injetado aqui) ---
                   if (msgLower === "saldo" || msgLower === "/saldo") {
                       finalReply = await billing.getOpenAISaldo_v1({ spreadsheetId: cfg.spreadsheetId });
                   } 
-                  // --- SUB-PROCESSO: TASK LIST ---
                   else if (msgLower === "task list" || msgLower === "testar sistema") {
                       await client.sendMessage(chatId, "⚙️ *MODO DE TESTE ATIVADO* ⚙️\nVou simular as respostas da sheet [RESPONSES] onde a PRIORIDADE é maior que 0.\n\n_(Aguarde, enviarei com pausas para evitar bloqueios do WhatsApp)_");
 
@@ -260,12 +250,10 @@ function registerOnMessage_v5(client, cfg) {
                   }
               }
           }
-          // ==========================================
-          // FLUXO NORMAL DA APLICAÇÃO
-          // ==========================================
           else {
               try {
                   if (processoReal === "__APP_ENSAIO__") {
+                      // 🚨 CORREÇÃO FEITA AQUI: Agora usamos as funções corretas de appEnsaio.js
                       let mod = require("../services/appEnsaio");
                       if (typeof mod.appEnsaio === "function") {
                           finalReply = await mod.appEnsaio({ pushname: fullName });
@@ -273,6 +261,8 @@ function registerOnMessage_v5(client, cfg) {
                           const out = await mod.getLatestEnsaio_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameEnsaio: cfg.sheetNameEnsaio });
                           if (out && out.DATA) finalReply += `\n\nO próximo ensaio está marcado para *${out.DATA}* às *${out.HORARIO}*. Responsável: ${out.RESPONSAVEL || "Não definido"}.`;
                           else finalReply += "\n\nNão encontrei a data do próximo ensaio.";
+                      } else {
+                          finalReply += "\n\n[Sistema] Erro: Função do Ensaio não encontrada no módulo.";
                       }
                   } else if (processoReal === "__AUSENCIAS__" || processoReal === "__APP_AUSENCIAS__") {
                       let mod = require("../services/appAusencias");
@@ -313,7 +303,6 @@ function registerOnMessage_v5(client, cfg) {
                   await client.sendMessage(chatId, bolha.trim());
               }
           }
-          // 💰 REGISTO DE GASTO (Injetado aqui: Só se a resposta veio da IA)
           if (!["ADMIN", "Bloqueio_Duplicado", "FALHA", "ERR"].includes(usedIdTable)) {
               await billing.registrarGasto_v1({ spreadsheetId: cfg.spreadsheetId, chatId, mensagem: bodyRaw });
           }
