@@ -7,6 +7,7 @@ require("dotenv").config();
 
 const cron = require("node-cron");
 const { processOpenRows } = require("./services/alarmProcessor");
+const { processCampaigns } = require("./services/campaignProcessor"); // Novo processador de campanhas
 
 const { startClient_v1 } = require("./send");
 const { registerOnMessage_v5 } = require("./handlers/onMessage");
@@ -44,7 +45,7 @@ const cfg = {
 };
 
 // Variável de segurança para não atropelar envios
-let isProcessingAlarms = false;
+let isProcessingVigia = false;
 
 // Função auxiliar para pegar a hora atual em PT
 function getHoraAtual() {
@@ -59,40 +60,47 @@ async function main_v5() {
   registerOnMessage_v5(client, cfg);
 
   // ==========================================
-  // ROTINA DE ALARMES (VIGIA CONTÍNUO)
+  // ROTINA DE VIGIA CONTÍNUO (ALARMES E CAMPANHAS)
   // ==========================================
   cron.schedule('*/2 * * * *', async () => {
     const hora = getHoraAtual();
     
-    // Se já estiver enviando mensagens, ele pula esta verificação para não duplicar
-    if (isProcessingAlarms) {
-        console.log(`[VIGIA] [${hora}] Verificação ignorada: Já existe um envio de alarmes em andamento.`);
+    // Se já estiver processando, pula para não duplicar envios
+    if (isProcessingVigia) {
+        console.log(`[VIGIA] [${hora}] Verificação ignorada: Já existe um processamento em andamento.`);
         return;
     }
 
-    // Exibe no terminal a hora exata em que o vigia "acordou" para olhar a planilha
-    console.log(`[VIGIA] [${hora}] Iniciando verificação de rotina na planilha de alarmes...`);
+    console.log(`[VIGIA] [${hora}] Iniciando verificação de rotina (Alarmes + Campanhas)...`);
     
-    isProcessingAlarms = true; // Tranca a porta
+    isProcessingVigia = true; // Tranca o processo
 
     try {
+      // 1. Processa Alarmísticas Tradicionais
       await processOpenRows({
         client: client, 
         spreadsheetId: cfg.spreadsheetId, 
         sheetName: cfg.sheetNameAlarmes,
-        sheetNameBp: cfg.sheetNameBp // <--- ABA DOS COLABORADORES ADICIONADA AQUI
+        sheetNameBp: cfg.sheetNameBp
       });
+
+      // 2. Processa Campanhas de Disparo em Massa (Baseado no Python)
+      await processCampaigns({ 
+        client, 
+        spreadsheetId: cfg.spreadsheetId 
+      });
+
     } catch (error) {
-      console.error(`[VIGIA] [${hora}] Erro crítico ao rodar os alarmes:`, error);
+      console.error(`[VIGIA] [${hora}] Erro crítico durante a execução:`, error);
     } finally {
-      isProcessingAlarms = false; // Destranca a porta quando terminar
+      isProcessingVigia = false; // Destranca o processo ao terminar
     }
 
   }, {
     timezone: "Europe/Lisbon"
   });
   
-  console.log('[SISTEMA] Vigia de Alarmes configurado para verificar a cada 2 minutos.');
+  console.log('[SISTEMA] Vigia Híbrido configurado para verificar a cada 2 minutos.');
   // ==========================================
 }
 

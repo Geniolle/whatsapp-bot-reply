@@ -35,5 +35,8 @@ npm install
 🚀 Passo 4: Reiniciar o Bot para aplicar as mudanças
 pm2 restart all
 
-🚀 Passo 5: Para veres os logs e confirmares que reiniciou bem
+🚀 Passo 5: Para limpar os logs
+pm2 flush
+
+🚀 Passo 6: Para veres os logs e confirmares que reiniciou bem
 pm2 logs

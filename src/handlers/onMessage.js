@@ -4,9 +4,9 @@
 "use strict";
 
 const { getRules, buildHumanizedResponse } = require("../services/responsesStore");
-const { getAccessByChatId } = require("../services/bpLookup");
+const { getAccessByChatId, desativarMensagensWS } = require("../services/bpLookup"); // 🟢 Importado desativarMensagensWS
 const { analisarComIA } = require("../services/aiAssistant");
-const billing = require("../services/appBilling"); // 💰 Importado para faturação
+const billing = require("../services/appBilling"); 
 
 const FALLBACK_DEFAULT = "Ups, a minha ligação falhou por um instante.";
 
@@ -27,9 +27,9 @@ const greeted = new Set();
 // 🛡️ SISTEMA ANTI-SPAM (Rate Limiting / Prevenção EDoS)
 // ==================================================================================
 const spamMonitor = new Map();
-const SPAM_LIMIT = 10; // Máximo de mensagens permitidas
-const SPAM_WINDOW_MS = 60 * 1000; // Num intervalo de 1 minuto
-const BLOCK_DURATION_MS = 5 * 60 * 1000; // Tempo de castigo (5 minutos)
+const SPAM_LIMIT = 10; 
+const SPAM_WINDOW_MS = 60 * 1000; 
+const BLOCK_DURATION_MS = 5 * 60 * 1000; 
 
 function isSpamming(chatId) {
     const now = Date.now();
@@ -52,13 +52,12 @@ function isSpamming(chatId) {
 
     if (user.count > SPAM_LIMIT) {
         user.blockedUntil = now + BLOCK_DURATION_MS;
-        console.warn(`[ANTI-SPAM] 🚨 O número ${chatId} foi bloqueado por ${BLOCK_DURATION_MS / 60000} minutos devido a excesso de mensagens.`);
+        console.warn(`[ANTI-SPAM] 🚨 O número ${chatId} foi bloqueado por ${BLOCK_DURATION_MS / 60000} minutos.`);
         return true;
     }
 
     return false;
 }
-// ==================================================================================
 
 async function simulateTyping(client, chatId, delayMs = 1500) {
   try {
@@ -81,8 +80,25 @@ function registerOnMessage_v5(client, cfg) {
     const bodyRaw = (message.body || "").trim();
     if (!bodyRaw) return;
 
-    if (isSpamming(chatId)) {
-        return; 
+    if (isSpamming(chatId)) return; 
+
+    // ==============================================================================
+    // 🚪 LÓGICA DE OPT-OUT (SAIR) - Executa antes da IA para economizar recursos
+    // ==============================================================================
+    const msgUpper = bodyRaw.toUpperCase();
+    if (msgUpper === "SAIR") {
+        console.log(`[OPT-OUT] 🚪 O utilizador ${chatId} solicitou remoção da lista.`);
+        const telefone = chatId.split("@")[0];
+        
+        await simulateTyping(client, chatId, 1000);
+        const removido = await desativarMensagensWS(cfg.spreadsheetId, cfg.sheetNameBp, telefone);
+
+        if (removido) {
+            await client.sendMessage(chatId, "✅ *Pedido Processado:*\nEntendido. Removemos o seu número da nossa lista de avisos automáticos. Caso queira voltar a receber as nossas comunicações, por favor contacte o administrador.");
+        } else {
+            await client.sendMessage(chatId, "⚠️ Não conseguimos processar o seu pedido automaticamente (contacto não encontrado ou erro de sistema). Por favor, informe o administrador para proceder à remoção manual.");
+        }
+        return; // Interrompe o fluxo aqui
     }
 
     try {
@@ -125,7 +141,7 @@ function registerOnMessage_v5(client, cfg) {
 
       let finalReply = String(aiResult.resposta || "").trim();
       let usedIdTable = String(aiResult.id_table || "").trim();
-      let processoReal = String(aiResult.processo || "").trim(); // GARANTIDO A CAPTURA DO PROCESSO DA IA
+      let processoReal = String(aiResult.processo || "").trim(); 
       let contextoReal = String(aiResult.contexto || "Nenhum").trim();
 
       // 🛡️ CONTROLE DE DUPLICAÇÃO
@@ -168,7 +184,6 @@ function registerOnMessage_v5(client, cfg) {
       } else if ((msgLower.includes("autor") || msgLower.includes("autores")) && aiResult.termo) {
           processoReal = "__APP_LIVRARIA_FILTRO_AUTOR__"; contextoReal = "LIVRARIA";
       } else if (aiResult.termo && processoReal !== "SEARCH_GOOGLE_PLACES" && (!processoReal || processoReal === "__APP_LIVRARIA__" || processoReal.includes("SEARCH"))) {
-          // 🛡️ CORREÇÃO: "SEARCH_GOOGLE_PLACES" agora está imune ao sequestro da Livraria!
           processoReal = "__APP_LIVRARIA_SEARCH__"; contextoReal = "LIVRARIA";
       }
 
@@ -190,7 +205,7 @@ function registerOnMessage_v5(client, cfg) {
                       finalReply = await billing.getOpenAISaldo_v1({ spreadsheetId: cfg.spreadsheetId });
                   } 
                   else if (msgLower === "task list" || msgLower === "testar sistema") {
-                      await client.sendMessage(chatId, "⚙️ *MODO DE TESTE ATIVADO* ⚙️\nVou simular as respostas da sheet [RESPONSES] onde a PRIORIDADE é maior que 0.\n\n_(Aguarde, enviarei com pausas para evitar bloqueios do WhatsApp)_");
+                      await client.sendMessage(chatId, "⚙️ *MODO DE TESTE ATIVADO* ⚙️\nSimulando respostas...");
 
                       const regrasParaTestar = allRules.filter(r => {
                           const prio = Number(r.PRIORIDADE || r.prioridade || 0);
@@ -198,7 +213,7 @@ function registerOnMessage_v5(client, cfg) {
                       }).sort((a, b) => Number(a.ID_TABLE || a.id_table || 0) - Number(b.ID_TABLE || b.id_table || 0));
 
                       if (regrasParaTestar.length === 0) {
-                          await client.sendMessage(chatId, "🤷‍♂️ Não encontrei nenhuma regra com a coluna PRIORIDADE configurada maior que zero.");
+                          await client.sendMessage(chatId, "🤷‍♂️ Nenhuma regra com PRIORIDADE > 0.");
                           return;
                       }
 
@@ -209,43 +224,26 @@ function registerOnMessage_v5(client, cfg) {
                           const repBase = String(regra.REPLY || regra.reply || regra.RESPOSTA || regra.resposta || "").trim();
 
                           let resParcial = repBase;
-
                           if (proc) {
                               try {
                                   if (proc === "__APP_ENSAIO__") {
                                       const modEnsaio = require("../services/appEnsaio");
                                       if (typeof modEnsaio.appEnsaio === "function") resParcial = await modEnsaio.appEnsaio({ pushname: "Admin" });
-                                      else {
-                                          const out = await modEnsaio.getLatestEnsaio_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameEnsaio: cfg.sheetNameEnsaio });
-                                          resParcial = out && out.DATA ? `[Simulação] Ensaio: *${out.DATA}* às *${out.HORARIO}*` : "[Simulação] Sem dados de ensaio.";
-                                      }
                                   } else if (proc === "__AUSENCIAS__" || proc === "__APP_AUSENCIAS__") {
                                       const modAusencias = require("../services/appAusencias");
                                       resParcial = await modAusencias.getMinhasAusencias_v1({ chatId, fullName: "Admin" });
                                   } else if (proc === "__APP_AGENDA__" || proc === "__APP_AGENDA_FULL__") {
                                       const modAgenda = require("../services/appAgenda");
-                                      const payload = await modAgenda.getAgendaDepartamentos_v1({
-                                          spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda,
-                                          cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon", onlyCurrentMonth: proc !== "__APP_AGENDA_FULL__"
-                                      });
+                                      const payload = await modAgenda.getAgendaDepartamentos_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon", onlyCurrentMonth: proc !== "__APP_AGENDA_FULL__" });
                                       resParcial = modAgenda.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
-                                  } else if (proc.includes("__APP_LIVRARIA")) {
-                                      const modLivraria = require("../services/appLivraria");
-                                      const sInfo = { spreadsheetId: "10UDDJdlTuPs65gdPnN7fcDQm6cfNCWp8gqlTqE3lUp4", sheetName: "DB_STOCK" };
-                                      if (proc === "__APP_LIVRARIA__") resParcial = await modLivraria.getLivrosEmStock_v1({ ...sInfo, searchTerm: "" });
-                                      else if (proc === "__APP_LIVRARIA_AUTORES__") resParcial = await modLivraria.getListasLivraria_v1({ ...sInfo, tipo: "AUTORES" });
-                                      else if (proc === "__APP_LIVRARIA_EDITORAS__") resParcial = await modLivraria.getListasLivraria_v1({ ...sInfo, tipo: "EDITORAS" });
                                   }
-                              } catch (e) {
-                                  resParcial = `❌ [Erro a simular processo ${proc}]: ${e.message}`;
-                              }
+                              } catch (e) { resParcial = `❌ [Erro]: ${e.message}`; }
                           }
                           const testMsg = `📝 *[ID: ${idTable}]*\n🗣️ *Pergunta:* "${chave}"\n🤖 *Bot responde:*\n${resParcial}`;
                           await simulateTyping(client, chatId, 1500);
                           await client.sendMessage(chatId, testMsg);
                           await new Promise(resolve => setTimeout(resolve, 3000));
                       }
-                      await simulateTyping(client, chatId, 1000);
                       await client.sendMessage(chatId, "✅ *Task List Finalizada!*");
                       return;
                   }
@@ -259,10 +257,8 @@ function registerOnMessage_v5(client, cfg) {
                           finalReply = await mod.appEnsaio({ pushname: fullName });
                       } else if (typeof mod.getLatestEnsaio_v1 === "function") {
                           const out = await mod.getLatestEnsaio_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameEnsaio: cfg.sheetNameEnsaio });
-                          if (out && out.DATA) finalReply += `\n\nO próximo ensaio está marcado para *${out.DATA}* às *${out.HORARIO}*. Responsável: ${out.RESPONSAVEL || "Não definido"}.`;
+                          if (out && out.DATA) finalReply += `\n\nO próximo ensaio está marcado para *${out.DATA}* às *${out.HORARIO}*.`;
                           else finalReply += "\n\nNão encontrei a data do próximo ensaio.";
-                      } else {
-                          finalReply += "\n\n[Sistema] Erro: Função do Ensaio não encontrada no módulo.";
                       }
                   } else if (processoReal === "__AUSENCIAS__" || processoReal === "__APP_AUSENCIAS__") {
                       let mod = require("../services/appAusencias");
@@ -270,35 +266,24 @@ function registerOnMessage_v5(client, cfg) {
                   } else if (processoReal === "__APP_AGENDA__" || processoReal === "__APP_AGENDA_FULL__") {
                       let mod = require("../services/appAgenda");
                       const isFull = (processoReal === "__APP_AGENDA_FULL__");
-                      const payload = await mod.getAgendaDepartamentos_v1({ 
-                          spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, 
-                          cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon", onlyCurrentMonth: !isFull 
-                      });
+                      const payload = await mod.getAgendaDepartamentos_v1({ spreadsheetId: cfg.spreadsheetId, sheetNameAgenda: cfg.sheetNameAgenda, cacheSeconds: cfg.cacheAgendaSeconds, timeZone: "Europe/Lisbon", onlyCurrentMonth: !isFull });
                       const agendaText = mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
                       if (agendaText) finalReply += "\n\n" + agendaText;
                   } 
-                  // 🚀 MÓDULO GOOGLE PLACES ADICIONADO AQUI!
                   else if (processoReal === "SEARCH_GOOGLE_PLACES") {
                       if (!process.env.GOOGLE_PLACES_KEY) {
-                          finalReply = "Pedimos desculpa, mas o meu módulo de Guia de Braga não está configurado corretamente no servidor (falta a Google Key no ficheiro .env).";
+                          finalReply = "Guia de Braga não configurado.";
                       } else {
-                          const loadingMsg = `Olá ${getFirstName(fullName)}! Como pediu, vou procurar no Google Maps as melhores opções de *${termoExtraido}* aqui perto da igreja:\n\n_(Aguarde um momento, estou a ir buscar as moradas e horários reais...)_`;
+                          const loadingMsg = `Olá ${getFirstName(fullName)}! Vou procurar *${termoExtraido}* no Google Maps...`;
                           await simulateTyping(client, chatId, 1000);
                           await client.sendMessage(chatId, loadingMsg);
-                          finalReply = ""; // Limpa a reposta para não enviar o loading em duplicado
+                          finalReply = ""; 
 
                           const placesMod = require("../services/googlePlaces");
                           const moradaIgreja = "Praceta Beato Inácio de Azevedo, 7, Braga";
-                          
-                          const placesText = await placesMod.getNearbyPlacesFormated_v1({
-                              apiKey: process.env.GOOGLE_PLACES_KEY,
-                              centralAddress: moradaIgreja,
-                              searchTerm: termoExtraido,
-                              maxResults: 4
-                          });
-
+                          const placesText = await placesMod.getNearbyPlacesFormated_v1({ apiKey: process.env.GOOGLE_PLACES_KEY, centralAddress: moradaIgreja, searchTerm: termoExtraido, maxResults: 4 });
                           if (placesText) finalReply = placesText;
-                          else finalReply = `Não consegui encontrar locais de *${termoExtraido}* perto da igreja no Google Maps neste momento.`;
+                          else finalReply = `Não encontrei *${termoExtraido}* perto da igreja.`;
                       }
                   }
                   else if (processoReal.includes("__APP_LIVRARIA")) {

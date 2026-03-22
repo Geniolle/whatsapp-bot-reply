@@ -138,6 +138,20 @@ function deptNameFromHeader_v1(h) {
   return t.replace(/^D\.\s*/i, "").trim();
 }
 
+/**
+ * Converte um índice de coluna (0, 1, 2...) para notação A1 (A, B, C...)
+ */
+function colToA1(idx) {
+    let n = idx + 1;
+    let s = "";
+    while (n > 0) {
+      let m = (n - 1) % 26;
+      s = String.fromCharCode(65 + m) + s;
+      n = Math.floor((n - 1) / 26);
+    }
+    return s;
+}
+
 //###################################################################################
 // Google Sheets client (service account)
 //###################################################################################
@@ -154,7 +168,7 @@ function getSheetsClient_v1() {
   const creds = JSON.parse(fs.readFileSync(credPath, "utf8"));
   const auth = new google.auth.GoogleAuth({
     credentials: creds,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
 
   sheetsClient = google.sheets({ version: "v4", auth });
@@ -326,6 +340,45 @@ async function getAccessByChatId({
 }
 
 //###################################################################################
+// NOVO: Desativação de Mensagens (Opt-out)
+//###################################################################################
+async function desativarMensagensWS(spreadsheetId, sheetNameBp, telefone) {
+    try {
+        const { readSheet, writeCells } = require("./sheets");
+        const data = await readSheet(spreadsheetId, sheetNameBp);
+        if (!data || data.length < 2) return false;
+
+        const headers = data[0].map(h => stripBom(h).trim().toUpperCase());
+        const idxTel = headers.indexOf("TELEFONE");
+        const idxNumberWp = headers.indexOf("NUMBER_WHATSAPP");
+        const idxMsgWs = headers.indexOf("MENSAGEM WS");
+
+        if (idxMsgWs === -1) {
+            console.error(`[BP_LOOKUP] Coluna [MENSAGEM WS] não encontrada na aba ${sheetNameBp}`);
+            return false;
+        }
+
+        const telBusca = onlyDigits_v1(telefone);
+
+        for (let i = 1; i < data.length; i++) {
+            const telA = onlyDigits_v1(data[i][idxTel] || "");
+            const telB = onlyDigits_v1(data[i][idxNumberWp] || "");
+
+            if (telA === telBusca || telB === telBusca) {
+                const range = `${sheetNameBp}!${colToA1(idxMsgWs)}${i + 1}`;
+                await writeCells(spreadsheetId, range, [["FALSE"]]);
+                console.log(`[BP_LOOKUP] ✅ Contacto ${telefone} removido da lista (Linha ${i + 1})`);
+                return true;
+            }
+        }
+        return false;
+    } catch (error) {
+        console.error("[BP_LOOKUP] Erro ao desativar mensagens:", error.message);
+        return false;
+    }
+}
+
+//###################################################################################
 // Helpers
 //###################################################################################
 async function getFullNameByChatId({ spreadsheetId, sheetNameBp, chatId, cacheSeconds, debugRowLog }) {
@@ -342,5 +395,6 @@ async function getFirstNameByChatId({ spreadsheetId, sheetNameBp, chatId, cacheS
 module.exports = {
   getAccessByChatId,
   getFullNameByChatId,
-  getFirstNameByChatId, // compat
+  getFirstNameByChatId, 
+  desativarMensagensWS // Exportado para uso no onMessage.js
 };
