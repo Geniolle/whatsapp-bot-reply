@@ -7,7 +7,7 @@ require("dotenv").config();
 
 const cron = require("node-cron");
 const { processOpenRows } = require("./services/alarmProcessor");
-const { processCampaigns } = require("./services/campaignProcessor"); // Novo processador de campanhas
+const { processCampaigns } = require("./services/campaignProcessor");
 
 const { startClient_v1 } = require("./send");
 const { registerOnMessage_v5 } = require("./handlers/onMessage");
@@ -16,41 +16,29 @@ const { registerOnMessage_v5 } = require("./handlers/onMessage");
 // Config
 //###################################################################################
 const cfg = {
-  // Base
   spreadsheetId: process.env.SPREADSHEET_ID,
   sheetNameResp: process.env.SHEET_NAME_RESP,
   cacheSeconds: Number(process.env.CACHE_SECONDS || 60),
 
-  // BP SERVICE (ACL)
   sheetNameBp: process.env.SHEET_NAME_BP || process.env.SHEET_NAME_BP_SERVICE,
   cacheBpSeconds: Number(process.env.CACHE_BP_SECONDS || 300),
 
-  // AUSÊNCIAS
   sheetNameAusencias: process.env.SHEET_NAME_AUSENCIAS,
   cacheAusenciasSeconds: Number(process.env.CACHE_AUSENCIAS_SECONDS || 300),
 
-  // ENSAIO
   sheetNameEnsaio: process.env.SHEET_NAME_ENSAIO,
   cacheEnsaioSeconds: Number(process.env.CACHE_ENSAIO_SECONDS || 300),
 
-  // AGENDA
   sheetNameAgenda: process.env.SHEET_NAME_AGENDA,
   cacheAgendaSeconds: Number(process.env.CACHE_AGENDA_SECONDS || 300),
 
-  // ALARMES 
   sheetNameAlarmes: process.env.SHEET_NAME_ALARMES || "ALARMISTICAS",
 
-  // Outros
   ignoreLid: String(process.env.IGNORE_LID || "false").toLowerCase() === "true",
 };
 
 // Variável de segurança para não atropelar envios
 let isProcessingVigia = false;
-
-// Função auxiliar para pegar a hora atual em PT
-function getHoraAtual() {
-  return new Date().toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" });
-}
 
 //###################################################################################
 // Start
@@ -60,23 +48,17 @@ async function main_v5() {
   registerOnMessage_v5(client, cfg);
 
   // ==========================================
-  // ROTINA DE VIGIA CONTÍNUO (ALARMES E CAMPANHAS)
+  // ROTINA DE VIGIA SILENCIOSA (A cada 2 minutos)
   // ==========================================
   cron.schedule('*/2 * * * *', async () => {
-    const hora = getHoraAtual();
     
-    // Se já estiver processando, pula para não duplicar envios
-    if (isProcessingVigia) {
-        console.log(`[VIGIA] [${hora}] Verificação ignorada: Já existe um processamento em andamento.`);
-        return;
-    }
+    // Se já estiver processando, sai silenciosamente
+    if (isProcessingVigia) return;
 
-    console.log(`[VIGIA] [${hora}] Iniciando verificação de rotina (Alarmes + Campanhas)...`);
-    
-    isProcessingVigia = true; // Tranca o processo
+    isProcessingVigia = true; 
 
     try {
-      // 1. Processa Alarmísticas Tradicionais
+      // 1. Processa Alarmísticas (Logs internos agora só aparecem se houver envio)
       await processOpenRows({
         client: client, 
         spreadsheetId: cfg.spreadsheetId, 
@@ -84,23 +66,24 @@ async function main_v5() {
         sheetNameBp: cfg.sheetNameBp
       });
 
-      // 2. Processa Campanhas de Disparo em Massa (Baseado no Python)
+      // 2. Processa Campanhas (Logs internos agora só aparecem se houver envio)
       await processCampaigns({ 
         client, 
         spreadsheetId: cfg.spreadsheetId 
       });
 
     } catch (error) {
-      console.error(`[VIGIA] [${hora}] Erro crítico durante a execução:`, error);
+      const hora = new Date().toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" });
+      console.error(`[VIGIA] [${hora}] Erro crítico:`, error.message);
     } finally {
-      isProcessingVigia = false; // Destranca o processo ao terminar
+      isProcessingVigia = false; 
     }
 
   }, {
     timezone: "Europe/Lisbon"
   });
   
-  console.log('[SISTEMA] Vigia Híbrido configurado para verificar a cada 2 minutos.');
+  console.log('[SISTEMA] Vigia Híbrido ativo (Modo Silencioso).');
   // ==========================================
 }
 

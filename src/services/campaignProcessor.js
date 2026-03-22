@@ -79,11 +79,10 @@ async function downloadDriveImageAsMedia(imagePath) {
 }
 
 /**
- * Processa campanhas de envio em massa com BATCHING e SPINTAX
+ * Processa campanhas de envio em massa (Modo Silencioso)
  */
 async function processCampaigns({ client, spreadsheetId }) {
-  console.log("[CAMPANHAS] Verificando campanhas ativas...");
-
+  // A verificação inicial agora é silenciosa para evitar poluição do log
   const campaignData = await readSheet(spreadsheetId, "Whatsapp");
   if (!campaignData || campaignData.length < 2) return;
 
@@ -111,14 +110,15 @@ async function processCampaigns({ client, spreadsheetId }) {
     }
   }
 
+  // Se não houver campanha ativa, sai em silêncio
   if (!activeCampaign) return;
 
-  // 1. Definição do LOTE (Batching)
-  const LIMITE_POR_RODADA = 15; // Conforme solicitado: 15 mensagens por vez
+  // Só imprime no terminal após encontrar uma campanha ativa
+  const LIMITE_POR_RODADA = 15; 
   let enviadosNestaRodada = 0;
   let totalPendentes = 0;
 
-  console.log(`🚀 Campanha: ${activeCampaign.titulo} (Limite do lote: ${LIMITE_POR_RODADA})`);
+  console.log(`🚀 [CAMPANHA ATIVA] Iniciando disparos: "${activeCampaign.titulo}" (Lote: ${LIMITE_POR_RODADA})`);
 
   let media = null;
   if (activeCampaign.imagePath) {
@@ -140,7 +140,6 @@ async function processCampaigns({ client, spreadsheetId }) {
   for (let r = 1; r < dbData.length; r++) {
     const row = dbData[r];
     
-    // Filtros de envio
     if (String(row[idxInativo]).toLowerCase() === "true") continue;
     if (String(row[idxMsgWs]).toLowerCase() !== "true") continue;
     if (String(row[idxIdDest]) === String(activeCampaign.id)) continue;
@@ -150,7 +149,6 @@ async function processCampaigns({ client, spreadsheetId }) {
       if (colGrupoIdx === -1 || String(row[colGrupoIdx]).toLowerCase() !== "true") continue;
     }
 
-    // Se já atingiu o limite do lote nesta rodada (2 min), para por aqui
     if (enviadosNestaRodada >= LIMITE_POR_RODADA) {
       totalPendentes++; 
       continue; 
@@ -161,7 +159,6 @@ async function processCampaigns({ client, spreadsheetId }) {
 
     const nome = row[idxNome] || "irmão(ã)";
     
-    // 2. Montagem com SPINTAX e Tags
     let textoFinal = `*${activeCampaign.titulo}*\n\n` +
                      `${activeCampaign.saudacao.replace("{NOME}", nome).replace("{SAUDACAO}", saudacaoPeriodo)}\n\n` +
                      `${activeCampaign.mensagem}\n\n` +
@@ -169,7 +166,6 @@ async function processCampaigns({ client, spreadsheetId }) {
                      `_${activeCampaign.rodape}_\n\n` +
                      `> Responda *SAIR* para não receber mais estes avisos.`;
 
-    // Aplica a variabilidade de texto [opção 1|opção 2]
     textoFinal = aplicarSpintax(textoFinal);
 
     try {
@@ -186,9 +182,8 @@ async function processCampaigns({ client, spreadsheetId }) {
         await writeCells(spreadsheetId, `BP SERVICE!${colToA1(idxIdDest)}${r + 1}`, [[activeCampaign.id]]);
         
         enviadosNestaRodada++;
-        console.log(`✅ [${enviadosNestaRodada}/${LIMITE_POR_RODADA}] Enviado: ${nome}`);
+        console.log(`✅ [${enviadosNestaRodada}/${LIMITE_POR_RODADA}] Enviado para: ${nome}`);
 
-        // Delay Humano Aleatório (15 a 30 seg)
         const delayMassa = Math.floor(Math.random() * (30000 - 15000 + 1)) + 15000;
         await sleep(delayMassa); 
       }
@@ -197,12 +192,11 @@ async function processCampaigns({ client, spreadsheetId }) {
     }
   }
 
-  // Se não houver mais ninguém pendente para este ID de campanha, marca como Concluído
   if (totalPendentes === 0 && enviadosNestaRodada > 0) {
     await writeCells(spreadsheetId, `Whatsapp!${colToA1(idxStatusWs)}${campaignRowIndex}`, [["Concluído"]]);
     console.log("🏁 Campanha finalizada!");
   } else if (totalPendentes > 0) {
-    console.log(`⏳ Lote concluído. Ainda faltam ${totalPendentes} contactos. Aguardando próximo ciclo.`);
+    console.log(`⏳ Lote concluído. Restam ${totalPendentes} contactos pendentes.`);
   }
 }
 
