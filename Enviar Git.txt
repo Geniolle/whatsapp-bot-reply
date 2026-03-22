@@ -43,4 +43,4 @@ pm2 flush
 pm2 logs
 
 Unico disparo.
-git pull; npm install; pm2 restart all; pm2 flush; pm2 logs
+git pull; npm install; pm2 restart all; pm2 flush; pm2 logsç
