@@ -15,7 +15,8 @@ git push
 (Nota: Se for a primeira vez que sobes esta branch ou se der algum erro a pedir a origem, podes usar
 git push origin main ou git push origin master, dependendo do nome da tua branch principal).
 
-git status && git add . && git commit -m "Atualização: Filtros de log, Batching e Spintax" && git push
+Unico disparo.
+git status; git add .; git commit -m "Atualização: Filtros de log, Batching e Spintax"; git push
 
 ##### ENVIAR AO SERVIDOR #####
 

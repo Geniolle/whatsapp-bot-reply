@@ -73,10 +73,8 @@ function safeErrMsg(err) {
 // FUNÇÕES DE HUMANIZAÇÃO
 // =================================================================
 
-// Função para descobrir se é dia, tarde ou noite no fuso horário de Portugal
 function getSaudacaoTempo() {
   const agora = new Date();
-  // Pega apenas a hora exata baseada em Lisboa para não haver erro de servidor
   const horaString = agora.toLocaleString("en-US", { timeZone: "Europe/Lisbon", hour: 'numeric', hour12: false });
   const horaPT = parseInt(horaString, 10);
 
@@ -116,12 +114,10 @@ async function loadCollaborators(spreadsheetId, bpSheetName) {
   }
 }
 
-// Monta a mensagem final super humana com o nome do PROCESSO e SAUDAÇÃO dinâmica
 function humanizeMessage(nomeCompleto, processo, contextoDaPlanilha) {
   const nomeProcesso = processo !== "(SEM PROCESSO)" ? processo : "atualização de dados";
-  const tempoDescritivo = getSaudacaoTempo(); // Retorna: "bom dia", "boa tarde" ou "boa noite"
+  const tempoDescritivo = getSaudacaoTempo(); 
   
-  // Transforma a primeira letra da saudação em maiúscula quando necessário (ex: "Bom dia")
   const tempoCapitalizado = tempoDescritivo.charAt(0).toUpperCase() + tempoDescritivo.slice(1);
 
   let intro = "";
@@ -151,15 +147,9 @@ function humanizeMessage(nomeCompleto, processo, contextoDaPlanilha) {
 // =================================================================
 
 async function processOpenRows({ client, spreadsheetId, sheetName, sheetNameBp }) {
-  console.log(`[ALARMES] Iniciando varredura na planilha: ${sheetName}`);
-  
-  const colaboradoresMap = await loadCollaborators(spreadsheetId, sheetNameBp);
-
+  // Ajuste: A leitura agora é silenciosa
   const data = await readSheet(spreadsheetId, sheetName);
-  if (data.length < 2) {
-    console.log("[ALARMES] Sem dados (ou só cabeçalho).");
-    return;
-  }
+  if (data.length < 2) return;
 
   const header = data[0];
   const H = buildHeaderIndex(header);
@@ -169,31 +159,34 @@ async function processOpenRows({ client, spreadsheetId, sheetName, sheetNameBp }
   const colSTATUS_WS = H["STATUS_WS"];
   const colSTATUS_ERRO = H["STATUS_ERRO"];
 
-  if (colPROCESSO == null || colSTATUS == null || colSTATUS_WS == null) {
-    console.log("[ALARMES] Colunas base em falta na planilha.");
-    return;
-  }
+  if (colPROCESSO == null || colSTATUS == null || colSTATUS_WS == null) return;
 
   const sequentials = discoverSequentials(header);
-  if (!sequentials.length) {
-    console.log("[ALARMES] Nenhum par sequencial encontrado.");
-    return;
-  }
+  if (!sequentials.length) return;
 
   const group = {}; 
   const dataDeHoje = todayPtStr();
+  
+  // Ajuste: Carregamento de colaboradores agora só ocorre se houver pelo menos uma linha "em aberto"
+  let colaboradoresMap = null;
 
   for (let r = 1; r < data.length; r++) {
     const row = data[r] || [];
     const status = String(row[colSTATUS] || "").trim().toLowerCase();
     if (status !== "em aberto") continue;
 
+    // Se chegou aqui, existe trabalho a fazer. Iniciamos os logs e carregamos o mapa.
+    if (!colaboradoresMap) {
+        console.log(`[ALARMES] 🚨 Notificações em aberto encontradas na planilha: ${sheetName}`);
+        colaboradoresMap = await loadCollaborators(spreadsheetId, sheetNameBp);
+    }
+
     const processo = String(row[colPROCESSO] || "").trim() || `(SEM PROCESSO)`;
     const sheetRow = r + 1;
     const statusWsVal = String(row[colSTATUS_WS] || "").trim();
 
     if (statusWsVal.startsWith(dataDeHoje)) {
-        console.log(`[ALARMES] ⚠️ [BLOQUEADO] A linha ${sheetRow} (${processo}) já tem um registo de hoje (${statusWsVal}). Alterando para "Concluído" sem enviar.`);
+        console.log(`[ALARMES] ⚠️ [BLOQUEADO] A linha ${sheetRow} (${processo}) já tem um registo de hoje (${statusWsVal}).`);
         await setCell(spreadsheetId, sheetName, colSTATUS, sheetRow, "Concluído");
         continue; 
     }
