@@ -16,7 +16,7 @@ git push
 git push origin main ou git push origin master, dependendo do nome da tua branch principal).
 
 Unico disparo.
-git status; git add .; git commit -m "Atualização: Filtros de log, Batching e Spintax"; git push
+ç
 
 ##### ENVIAR AO SERVIDOR #####
 
@@ -43,4 +43,4 @@ pm2 flush
 pm2 logs
 
 Unico disparo.
-git pull; npm install; pm2 restart all; pm2 flush; pm2 logsç
+git pull; npm install; pm2 restart all; pm2 flush; pm2 logs

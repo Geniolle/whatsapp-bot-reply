@@ -132,7 +132,7 @@ async function executeFinalAction(client, senderId, dbId, requestId, newStatus, 
         await safeSend(client, senderId, `✅ Feito! O pedido *#${requestId}* foi marcado como *${newStatus.toUpperCase()}*.`);
         const reqNum = String(data.numeroSolicitante || "").replace(/\D/g, "");
         if (reqNum) {
-            const notification = `📢 *FEEDBACK DE APOIO*\n\nO pedido de apoio (#${requestId}) enviado ao responsável *${data.apoioData.liderNome}*, do departamento *${data.apoioData.departamento}*, foi *${newStatus.toUpperCase()}*.\n\nPara qualquer dúvida ou questão, por favor, entre em contacto direto com o mesmo.`;
+            const notification = `📢 *FEEDBACK DE APOIO*\n\nO pedido de apoio (#${requestId}) - *"${data.detalhes}"* - enviado ao responsável *${data.apoioData.liderNome}*, do departamento *${data.apoioData.departamento}*, foi *${newStatus.toUpperCase()}*.\n\nPara qualquer dúvida ou questão, por favor, entre em contacto direto com o mesmo.`;
             await safeSend(client, `${reqNum}@c.us`, notification);
         }
         return true;
