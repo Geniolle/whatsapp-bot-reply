@@ -8,6 +8,7 @@ require("dotenv").config();
 const cron = require("node-cron");
 const { processOpenRows } = require("./services/alarmProcessor");
 const { processCampaigns } = require("./services/campaignProcessor");
+const { checkAndNotifyNewRequests } = require("./services/appScheduling");
 
 const { startClient_v1 } = require("./send");
 const { registerOnMessage_v5 } = require("./handlers/onMessage");
@@ -34,10 +35,12 @@ const cfg = {
 
   sheetNameAlarmes: process.env.SHEET_NAME_ALARMES || "ALARMISTICAS",
 
+  // 🟢 NOVA CONFIG: LER A ABA DE APOIO DO .ENV
+  sheetNameApoio: process.env.SHEET_NAME_APOIO || "WS_COMUNICACAO",
+
   ignoreLid: String(process.env.IGNORE_LID || "false").toLowerCase() === "true",
 };
 
-// Variável de segurança para não atropelar envios
 let isProcessingVigia = false;
 
 //###################################################################################
@@ -52,13 +55,10 @@ async function main_v5() {
   // ==========================================
   cron.schedule('*/2 * * * *', async () => {
     
-    // Se já estiver processando, sai silenciosamente
     if (isProcessingVigia) return;
-
     isProcessingVigia = true; 
 
     try {
-      // 1. Processa Alarmísticas (Logs internos agora só aparecem se houver envio)
       await processOpenRows({
         client: client, 
         spreadsheetId: cfg.spreadsheetId, 
@@ -66,11 +66,13 @@ async function main_v5() {
         sheetNameBp: cfg.sheetNameBp
       });
 
-      // 2. Processa Campanhas (Logs internos agora só aparecem se houver envio)
       await processCampaigns({ 
         client, 
         spreadsheetId: cfg.spreadsheetId 
       });
+
+      // 🟢 Processa Agendamentos lendo a config do .env
+      await checkAndNotifyNewRequests(client, cfg);
 
     } catch (error) {
       const hora = new Date().toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" });
@@ -83,8 +85,7 @@ async function main_v5() {
     timezone: "Europe/Lisbon"
   });
   
-  console.log('[SISTEMA] Vigia Híbrido ativo (Modo Silencioso).');
-  // ==========================================
+  console.log('[SISTEMA] Vigia Híbrido ativo (Modo Silencioso com Agendamentos).');
 }
 
 main_v5().catch((e) => {
