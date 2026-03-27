@@ -1,43 +1,10 @@
 //###################################################################################
-// src/handlers/schedulingFlow.js - VERSÃO COM VLOOKUP NA WS_COMUNICACAO
+// src/handlers/schedulingFlow.js - VERSÃO DIRETA (LÊ COLUNA ID_NUMBER)
 //###################################################################################
 "use strict";
 
 const { findAllPendingByLeader, updateStatusById, getNextInBatch } = require("../services/appScheduling");
 const { simulateTyping, safeSend } = require("./onMessageUtils");
-const { readRange } = require("../services/sheets"); // Importamos o leitor do Excel
-
-// 👇 NOVA FUNÇÃO: Vai à folha WS_COMUNICACAO procurar o ID_NUMBER pelo Nome 👇
-async function findPhoneByNome(spreadsheetId, nomeSolicitante) {
-    if (!nomeSolicitante) return null;
-    try {
-        const sheetName = process.env.SHEET_NAME_BP || "WS_COMUNICACAO";
-        const values = await readRange(spreadsheetId, `'${sheetName}'!A:Z`);
-        
-        if (!values || values.length < 2) return null;
-
-        const headers = values[0].map(h => String(h || "").trim().toUpperCase());
-        // Procura a coluna do nome (NOME) e do contacto (ID_NUMBER)
-        const idxNome = headers.findIndex(h => h === "NOME" || h === "NOME_COMPLETO" || h.includes("NOME"));
-        const idxPhone = headers.findIndex(h => h === "ID_NUMBER");
-
-        if (idxNome < 0 || idxPhone < 0) return null;
-
-        const target = String(nomeSolicitante).trim().toLowerCase();
-        
-        for (let i = 1; i < values.length; i++) {
-            const rowName = String(values[i][idxNome] || "").trim().toLowerCase();
-            // Verifica se o nome coincide
-            if (rowName === target) {
-                const phone = String(values[i][idxPhone] || "").trim();
-                if (phone) return phone;
-            }
-        }
-    } catch (e) {
-        console.error("[LOOKUP_PHONE_ERR]", e.message);
-    }
-    return null;
-}
 
 async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
     const textNorm = bodyRaw.trim().toLowerCase();
@@ -86,20 +53,18 @@ async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
                 
                 // 2. Feedback ao Solicitante
                 try {
-                    // Primeiro tenta ver se já veio com a data, senão, vai à WS_COMUNICACAO procurar o nome do Solicitante
-                    let contatoSolicitante = data.chatIdSolicitante || data.telefoneSolicitante || validPending.telefoneSolicitante;
-                    
-                    if (!contatoSolicitante) {
-                        const nomeParaBuscar = data.solicitante || validPending.solicitante;
-                        contatoSolicitante = await findPhoneByNome(cfg.spreadsheetId, nomeParaBuscar);
-                    }
+                    // 👇 A MÁGICA ESTÁ AQUI: Vai buscar diretamente à sua coluna ID_NUMBER 👇
+                    const contatoSolicitante = data.ID_NUMBER || data.id_number || data.idNumber || validPending.ID_NUMBER || validPending.id_number || validPending.idNumber;
                     
                     if (contatoSolicitante) {
-                        const formatId = String(contatoSolicitante).includes('@c.us') ? contatoSolicitante : `${contatoSolicitante}@c.us`;
+                        // Limpa o "+" (caso exista) e garante a formatação correta para o WhatsApp
+                        const numeroLimpo = String(contatoSolicitante).replace('+', '').trim();
+                        const formatId = numeroLimpo.includes('@c.us') ? numeroLimpo : `${numeroLimpo}@c.us`;
+                        
                         const msgFeedback = `🔔 *ATUALIZAÇÃO DE PEDIDO*\n\nOlá *${data.solicitante || validPending.solicitante}*! O seu pedido de apoio *#${targetId}* acabou de ser avaliado.\n\n👤 *Apoio:* ${data.apoio || validPending.apoio}\n📊 *Status:* ${actionStatus}`;
                         await safeSend(client, formatId, msgFeedback);
                     } else {
-                        console.log(`[AVISO] Não foi possível encontrar o ID_NUMBER do solicitante "${data.solicitante}" na folha WS_COMUNICACAO.`);
+                        console.log(`[AVISO] Coluna ID_NUMBER não encontrada ou vazia para o pedido #${targetId}.`);
                     }
                 } catch (err) {
                     console.error("[NOTIFY_ERR]", err);
