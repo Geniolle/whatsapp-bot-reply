@@ -16,7 +16,8 @@ git push
 git push origin main ou git push origin master, dependendo do nome da tua branch principal).
 
 Unico disparo.
-ç
+
+git status ; git add . ; git commit -m "Atualização" ; git push
 
 ##### ENVIAR AO SERVIDOR #####
 
@@ -34,6 +35,7 @@ O servidor vai mostrar uma mensagem a dizer que transferiu os ficheiros e que fe
 npm install
 
 🚀 Passo 4: Reiniciar o Bot para aplicar as mudanças
+pm2 stop all
 pm2 restart all
 
 🚀 Passo 5: Para limpar os logs

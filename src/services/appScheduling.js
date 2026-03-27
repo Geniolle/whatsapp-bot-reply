@@ -1,5 +1,5 @@
 //###################################################################################
-// src/services/appScheduling.js
+// src/services/appScheduling.js - VERSÃO COM FILA DE LOTE INTELIGENTE
 //###################################################################################
 "use strict";
 
@@ -30,7 +30,6 @@ function getColumnIndexes(header) {
     number: header.findIndex(h => norm(h).includes("ID_NUMBER")),
     apoio: header.findIndex(h => norm(h).includes("APOIO")),
     detalhes: header.findIndex(h => norm(h).includes("DETALHES")),
-    // NOVO: Encontra a coluna TIMESTEMP ou TIMESTAMP
     timestamp: header.findIndex(h => norm(h).includes("TIMESTEMP") || norm(h).includes("TIMESTAMP"))
   };
 }
@@ -47,6 +46,10 @@ function parseApoioField(apoioStr) {
   };
 }
 
+// ==============================================================================
+// FUNÇÕES DE BUSCA E FILA
+// ==============================================================================
+
 async function findAllPendingByLeader({ spreadsheetId, leaderChatId }) {
   const sheets = await getSheetsClient();
   const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: `'${SHEET_NAME}'!A:Z` });
@@ -62,22 +65,48 @@ async function findAllPendingByLeader({ spreadsheetId, leaderChatId }) {
     const status = String(row[idx.status] || "").trim();
     const apoioInfo = parseApoioField(row[idx.apoio]);
 
-    const isPending = !status || status.includes("Aguardando");
+    // Aceita tanto "Aguardando" quanto "Em espera" para processamento via WhatsApp
+    const isPending = status.includes("Aguardando") || status.includes("Em espera");
 
     if (apoioInfo && apoioInfo.liderTelefone === leaderPhoneOnly && isPending) {
       pendings.push({
         rowIndex: i + 1,
         id: row[idx.id],
         solicitante: row[idx.solicitante],
+        apoio: row[idx.apoio],
         numeroSolicitante: row[idx.number],
         detalhes: row[idx.detalhes],
         departamento: apoioInfo.departamento,
-        liderNome: apoioInfo.liderNome,
-        colStatus: String.fromCharCode(65 + idx.status)
+        liderNome: apoioInfo.liderNome
       });
     }
   }
   return pendings;
+}
+
+/**
+ * Busca o próximo item "Em espera" do mesmo lote
+ */
+async function getNextInBatch(spreadsheetId, sheetName, solicitante, apoio) {
+    const sheets = await getSheetsClient();
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: `'${SHEET_NAME}'!A:Z` });
+    const rows = res.data.values || [];
+    if (rows.length < 2) return null;
+
+    const idx = getColumnIndexes(rows[0]);
+    
+    const nextRow = rows.find((r, i) => 
+        i > 0 && 
+        r[idx.solicitante] === solicitante && 
+        r[idx.apoio] === apoio && 
+        String(r[idx.status]).includes("Em espera")
+    );
+
+    return nextRow ? {
+        id: nextRow[idx.id],
+        detalhes: nextRow[idx.detalhes],
+        solicitante: nextRow[idx.solicitante]
+    } : null;
 }
 
 async function updateStatusById({ spreadsheetId, requestId, newStatus }) {
@@ -87,27 +116,25 @@ async function updateStatusById({ spreadsheetId, requestId, newStatus }) {
   if (rows.length < 2) return null;
 
   const idx = getColumnIndexes(rows[0]);
-  const nowStr = new Date().toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" }); // Data e hora atual
+  const nowStr = new Date().toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" });
 
   for (let i = 1; i < rows.length; i++) {
     if (String(rows[i][idx.id]).trim() === String(requestId).trim()) {
       const rowIndex = i + 1;
-      const colLetterStatus = String.fromCharCode(65 + idx.status);
       
-      // 1. Atualizar a coluna STATUS
+      // 1. Atualiza Status
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: `${SHEET_NAME}!${colLetterStatus}${rowIndex}`,
+        range: `${SHEET_NAME}!${String.fromCharCode(65 + idx.status)}${rowIndex}`,
         valueInputOption: "RAW",
         requestBody: { values: [[newStatus]] },
       });
 
-      // 2. Atualizar a coluna TIMESTEMP (se ela existir na folha)
+      // 2. Atualiza Timestamp
       if (idx.timestamp >= 0) {
-        const colLetterTs = String.fromCharCode(65 + idx.timestamp);
         await sheets.spreadsheets.values.update({
           spreadsheetId,
-          range: `${SHEET_NAME}!${colLetterTs}${rowIndex}`,
+          range: `${SHEET_NAME}!${String.fromCharCode(65 + idx.timestamp)}${rowIndex}`,
           valueInputOption: "RAW",
           requestBody: { values: [[nowStr]] },
         });
@@ -117,6 +144,7 @@ async function updateStatusById({ spreadsheetId, requestId, newStatus }) {
         id: requestId,
         solicitante: rows[i][idx.solicitante],
         numeroSolicitante: rows[i][idx.number],
+        apoio: rows[i][idx.apoio],
         apoioData: parseApoioField(rows[i][idx.apoio]),
         detalhes: rows[i][idx.detalhes]
       };
@@ -125,6 +153,9 @@ async function updateStatusById({ spreadsheetId, requestId, newStatus }) {
   return null;
 }
 
+// ==============================================================================
+// VIGIA COM LÓGICA DE FILA (O CORAÇÃO DA MUDANÇA)
+// ==============================================================================
 async function checkAndNotifyNewRequests(client, cfg) {
   const sheets = await getSheetsClient();
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: cfg.spreadsheetId, range: `'${SHEET_NAME}'!A:Z` });
@@ -132,33 +163,58 @@ async function checkAndNotifyNewRequests(client, cfg) {
   if (rows.length < 2) return;
 
   const idx = getColumnIndexes(rows[0]);
+  const lotesNotificados = new Set(); // Evita enviar 2 do mesmo lote na mesma rodada
 
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     const status = String(row[idx.status] || "").trim();
-    const apoioInfo = parseApoioField(row[idx.apoio]);
+    const solicitante = row[idx.solicitante];
+    const apoioRaw = row[idx.apoio];
+    const apoioInfo = parseApoioField(apoioRaw);
 
-    if (apoioInfo && !status) {
-      const requestId = row[idx.id];
-      const targetChatId = `${apoioInfo.liderTelefone}@c.us`;
-      const msg = `*CONFIRMAÇÃO DE SOLICITAÇÃO*\n\nOlá *${apoioInfo.liderNome}*, o departamento *${row[idx.solicitante]}* solicitou o apoio de *${apoioInfo.departamento}*.\n\n🆔 *ID do Pedido:* ${requestId}\n📝 *Detalhes:* ${row[idx.detalhes]}\n\nPara aceitar, responda apenas com *CONFIRMAR*. Para rejeitar, responda *RECUSAR*.`;
+    if (!apoioInfo || status) continue;
 
-      try {
-        await client.sendMessage(targetChatId, msg);
-        const colLetter = String.fromCharCode(65 + idx.status);
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: cfg.spreadsheetId,
-          range: `${SHEET_NAME}!${colLetter}${i + 1}`,
-          valueInputOption: "RAW",
-          requestBody: { values: [["Aguardando ⏳"]] },
-        });
-        console.log(`[VIGIA] Notificação enviada: Líder ${apoioInfo.liderNome} (Pedido #${requestId})`);
-        await new Promise(r => setTimeout(r, 2000)); 
-      } catch (err) {
-        console.error(`[VIGIA_ERR] Pedido #${requestId}:`, err.message);
-      }
+    const loteKey = `${solicitante}|${apoioRaw}`;
+
+    // Se já enviamos um deste lote agora, ou se já existe um "Aguardando" na planilha para este lote
+    const jaExisteAguardando = rows.some((r, idxR) => 
+        idxR > 0 && 
+        r[idx.solicitante] === solicitante && 
+        r[idx.apoio] === apoioRaw && 
+        String(r[idx.status]).includes("Aguardando")
+    );
+
+    if (lotesNotificados.has(loteKey) || jaExisteAguardando) {
+      // MARCA COMO EM ESPERA (FILA)
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: cfg.spreadsheetId,
+        range: `${SHEET_NAME}!${String.fromCharCode(65 + idx.status)}${i + 1}`,
+        valueInputOption: "RAW",
+        requestBody: { values: [["Em espera ⏳"]] },
+      });
+      continue;
+    }
+
+    // ENVIA O PRIMEIRO DO LOTE
+    const requestId = row[idx.id];
+    const targetChatId = `${apoioInfo.liderTelefone}@c.us`;
+    const msg = `*CONFIRMAÇÃO DE SOLICITAÇÃO*\n\nOlá *${apoioInfo.liderNome}*, o departamento *${solicitante}* solicitou o apoio de *${apoioInfo.departamento}*.\n\n🆔 *ID do Pedido:* ${requestId}\n📝 *Detalhes:* ${row[idx.detalhes]}\n\nPara aceitar, responda apenas com *CONFIRMAR*. Para rejeitar, responda *RECUSAR*.`;
+
+    try {
+      await client.sendMessage(targetChatId, msg);
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: cfg.spreadsheetId,
+        range: `${SHEET_NAME}!${String.fromCharCode(65 + idx.status)}${i + 1}`,
+        valueInputOption: "RAW",
+        requestBody: { values: [["Aguardando ⏳"]] },
+      });
+      lotesNotificados.add(loteKey);
+      console.log(`[VIGIA] Lote Iniciado: Pedido #${requestId} enviado.`);
+      await new Promise(r => setTimeout(r, 2000)); 
+    } catch (err) {
+      console.error(`[VIGIA_ERR] Pedido #${requestId}:`, err.message);
     }
   }
 }
 
-module.exports = { findAllPendingByLeader, updateStatusById, checkAndNotifyNewRequests };
+module.exports = { findAllPendingByLeader, updateStatusById, checkAndNotifyNewRequests, getNextInBatch };
