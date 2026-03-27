@@ -1,5 +1,5 @@
 //###################################################################################
-// src/handlers/intentManager.js - AGORA COM SUPORTE A HISTÓRICO
+// src/handlers/intentManager.js - VERSÃO COM DETEÇÃO INTELIGENTE DE AGENDAMENTOS
 //###################################################################################
 "use strict";
 
@@ -11,8 +11,9 @@ async function handleIntent(client, senderId, dbId, bodyRaw, cfg, userContext) {
     const textNorm = normalizeText(bodyRaw);
 
     // 1. PRIORIDADE MÁXIMA: Fluxo de Agendamento
-    const isSchedulingKeywords = ["confirmar", "recusar", "sim", "nao", "não", "ok"].includes(textNorm);
-    const isNumericId = /^\d+$/.test(bodyRaw.trim());
+    // Usamos Expressões Regulares (Regex) para detetar qualquer variação (confirma, confirmo, confirmar 34, etc.)
+    const isSchedulingKeywords = /^(confirmar|confirma|confirmo|aceitar|aceito|recusar|recuso|sim|nao|ok)(\s+\d+)?$/i.test(textNorm);
+    const isNumericId = /^\d+$/.test(textNorm);
 
     if (isSchedulingKeywords || isNumericId) {
         const handled = await handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg);
@@ -23,7 +24,7 @@ async function handleIntent(client, senderId, dbId, bodyRaw, cfg, userContext) {
     const aiResult = await analisarComIA(
         bodyRaw, 
         userContext.firstName, 
-        userContext.history || [], // <-- Histórico real passado aqui
+        userContext.history || [], 
         userContext.allRules, 
         userContext.agendaIA || ""
     );
