@@ -1,5 +1,5 @@
 //###################################################################################
-// src/handlers/schedulingFlow.js - VERSÃO BLINDADA PARA CONFIRMAÇÕES
+// src/handlers/schedulingFlow.js - VERSÃO COM FEEDBACK AO SOLICITANTE
 //###################################################################################
 "use strict";
 
@@ -21,7 +21,7 @@ async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
         // 3. Verificamos se o utilizador enviou APENAS um número
         const isNumericOnly = /^\d+$/.test(textNorm);
 
-        // 4. Nova lógica com suporte robusto (confirma, confirmo, confirmar)
+        // 4. Lógica de decisão
         const isConfirm = /^(confirmar|confirma|confirmo|aceitar|aceito|ok|sim)$/i.test(textNoNum) || isNumericOnly;
         const isReject = /^(recusar|recuso|nao|não)$/i.test(textNoNum);
         
@@ -30,10 +30,10 @@ async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
         let targetId = null;
         
         if (pendings.length === 1 && !requestIdFromMsg) {
-            targetId = pendings[0].id; // Só tem um, auto-seleciona
+            targetId = pendings[0].id;
         } 
         else if (requestIdFromMsg) {
-            targetId = requestIdFromMsg; // Tem número na mensagem, usa-o
+            targetId = requestIdFromMsg;
         } 
         else if (pendings.length > 1 && !requestIdFromMsg) {
             const listagem = pendings.map(p => `#${p.id}`).join(", ");
@@ -50,12 +50,37 @@ async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
             }
 
             const actionStatus = isConfirm ? "Confirmado ✅" : "Recusado ❌";
+            
+            // Aqui ele vai ao Excel guardar o estado
             const data = await updateStatusById({ spreadsheetId: cfg.spreadsheetId, requestId: targetId, newStatus: actionStatus });
             
             if (data) {
+                // 1. Avisa o Apoio (o líder)
                 await simulateTyping(client, senderId, 1000);
                 await safeSend(client, senderId, `✅ Feito! O pedido *#${targetId}* foi marcado como *${actionStatus.toUpperCase()}*.`);
                 
+                // 👇 2. NOVO: AVISA O SOLICITANTE (Feedback) 👇
+                try {
+                    // Ele tenta usar a coluna do telefone/chatId que vier do Excel (data)
+                    const contatoSolicitante = data.chatIdSolicitante || data.telefoneSolicitante || data.telefone || validPending.telefoneSolicitante; 
+                    
+                    if (contatoSolicitante) {
+                        // Garante que o ID tem a terminação do WhatsApp
+                        const formatId = String(contatoSolicitante).includes('@c.us') ? contatoSolicitante : `${contatoSolicitante}@c.us`;
+                        
+                        const msgFeedback = `🔔 *ATUALIZAÇÃO DE PEDIDO*\n\nOlá *${data.solicitante || 'Líder'}*! O seu pedido de apoio *#${targetId}* acabou de ser avaliado.\n\n👤 *Apoio:* ${data.apoio || validPending.apoio}\n📊 *Status:* ${actionStatus}`;
+                        
+                        // Envia a mensagem para o telemóvel de quem pediu!
+                        await safeSend(client, formatId, msgFeedback);
+                    } else {
+                        console.log(`[AVISO] Pedido #${targetId} alterado, mas não encontrámos a coluna com o número de WhatsApp do solicitante no Excel para lhe enviar o feedback.`);
+                    }
+                } catch (err) {
+                    console.error("[NOTIFY_ERR]", err);
+                }
+                // 👆 FIM DA NOVIDADE 👆
+                
+                // 3. Procura o próximo pedido
                 const proximo = await getNextInBatch(cfg.spreadsheetId, cfg.sheetNameScheduling, data.solicitante, data.apoio);
                 if (proximo) {
                     const nextMsg = `Encontrei outro pedido do mesmo solicitante (*${proximo.solicitante}*):\n\n🆔 *ID:* ${proximo.id}\n📝 *Detalhes:* ${proximo.detalhes}\n\nDeseja *CONFIRMAR* ou *RECUSAR*?`;
