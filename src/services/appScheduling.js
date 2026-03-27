@@ -1,5 +1,5 @@
 //###################################################################################
-// src/services/appScheduling.js - VERSÃO COM FILA DE LOTE INTELIGENTE
+// src/services/appScheduling.js - VERSÃO COM ETIQUETAS CORRIGIDAS (ID_NUMBER)
 //###################################################################################
 "use strict";
 
@@ -74,7 +74,10 @@ async function findAllPendingByLeader({ spreadsheetId, leaderChatId }) {
         id: row[idx.id],
         solicitante: row[idx.solicitante],
         apoio: row[idx.apoio],
-        numeroSolicitante: row[idx.number],
+        // 👇 AGORA AS ETIQUETAS ESTÃO CORRETAS! 👇
+        numeroSolicitante: row[idx.number], 
+        ID_NUMBER: row[idx.number],
+        idnumber: row[idx.number],
         detalhes: row[idx.detalhes],
         departamento: apoioInfo.departamento,
         liderNome: apoioInfo.liderNome
@@ -143,7 +146,10 @@ async function updateStatusById({ spreadsheetId, requestId, newStatus }) {
       return {
         id: requestId,
         solicitante: rows[i][idx.solicitante],
+        // 👇 E AQUI O ESTAFETA TAMBÉM ENTREGA O ID_NUMBER CERTO! 👇
         numeroSolicitante: rows[i][idx.number],
+        ID_NUMBER: rows[i][idx.number],
+        idnumber: rows[i][idx.number],
         apoio: rows[i][idx.apoio],
         apoioData: parseApoioField(rows[i][idx.apoio]),
         detalhes: rows[i][idx.detalhes]
