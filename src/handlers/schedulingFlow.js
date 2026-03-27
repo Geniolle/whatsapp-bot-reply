@@ -1,10 +1,45 @@
 //###################################################################################
-// src/handlers/schedulingFlow.js - VERSÃO DIRETA COM FIX DE MINÚSCULAS
+// src/handlers/schedulingFlow.js - VERSÃO COM NOME (BP SERVICE) E DETALHES
 //###################################################################################
 "use strict";
 
 const { findAllPendingByLeader, updateStatusById, getNextInBatch } = require("../services/appScheduling");
 const { simulateTyping, safeSend } = require("./onMessageUtils");
+const { readRange } = require("../services/sheets"); // Necessário para a busca do nome
+
+// 👇 NOVA FUNÇÃO: Busca o NOME na sheet 'BP SERVICE' usando o TELEFONE 👇
+async function findNameByPhone(spreadsheetId, phoneToFind) {
+    if (!phoneToFind) return null;
+    try {
+        const sheetName = process.env.SHEET_NAME_BP || "BP SERVICE"; 
+        const values = await readRange(spreadsheetId, `'${sheetName}'!A:Z`);
+        
+        if (!values || values.length < 2) return null;
+
+        const headers = values[0].map(h => String(h || "").trim().toUpperCase());
+        const idxTelefone = headers.findIndex(h => h.includes("TELEFONE"));
+        const idxNome = headers.findIndex(h => h === "NOME" || h === "NOME_COMPLETO");
+
+        if (idxTelefone < 0 || idxNome < 0) return null;
+
+        // Limpamos tudo o que não for número para garantir o match perfeito (tira o '+' ou espaços)
+        const targetPhone = String(phoneToFind).replace(/\D/g, "");
+
+        for (let i = 1; i < values.length; i++) {
+            const rowPhone = String(values[i][idxTelefone] || "").replace(/\D/g, "");
+            // Se o telemóvel da linha for igual ao procurado
+            if (rowPhone && (rowPhone.includes(targetPhone) || targetPhone.includes(rowPhone))) {
+                const nome = String(values[i][idxNome] || "").trim();
+                // Opcional: Pegar apenas o primeiro nome (separando por espaços)
+                const primeiroNome = nome.split(" ")[0];
+                if (primeiroNome) return primeiroNome;
+            }
+        }
+    } catch (e) {
+        console.error("[LOOKUP_NAME_ERR]", e.message);
+    }
+    return null;
+}
 
 async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
     const textNorm = bodyRaw.trim().toLowerCase();
@@ -53,15 +88,26 @@ async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
                 
                 // 2. Feedback ao Solicitante
                 try {
-                    // 👇 A MÁGICA ESTÁ AQUI: Vai buscar diretamente à sua coluna ID_NUMBER considerando a limpeza do normHeader 👇
                     const contatoSolicitante = data.idnumber || validPending.idnumber || data.ID_NUMBER || data.id_number || data.idNumber || validPending.ID_NUMBER || validPending.id_number || validPending.idNumber;
                     
                     if (contatoSolicitante) {
-                        // Limpa o "+" (caso exista) e garante a formatação correta para o WhatsApp
                         const numeroLimpo = String(contatoSolicitante).replace('+', '').trim();
                         const formatId = numeroLimpo.includes('@c.us') ? numeroLimpo : `${numeroLimpo}@c.us`;
                         
-                        const msgFeedback = `🔔 *ATUALIZAÇÃO DE PEDIDO*\n\nOlá *${data.solicitante || validPending.solicitante}*! O seu pedido de apoio *#${targetId}* acabou de ser avaliado.\n\n👤 *Apoio:* ${data.apoio || validPending.apoio}\n📊 *Status:* ${actionStatus}`;
+                        // 👇 BUSCA O NOME DA PESSOA 👇
+                        let nomeReal = await findNameByPhone(cfg.spreadsheetId, numeroLimpo);
+                        
+                        // Se não encontrar na BP SERVICE, usa o nome do departamento como plano B
+                        if (!nomeReal) {
+                            nomeReal = data.solicitante || validPending.solicitante;
+                        }
+
+                        // 👇 PEGA NOS DETALHES 👇
+                        const detalhesPedido = data.detalhes || validPending.detalhes || "";
+
+                        // 👇 A NOVA MENSAGEM AFIINADA 👇
+                        const msgFeedback = `🔔 *ATUALIZAÇÃO DE PEDIDO*\n\nOlá *${nomeReal}*! O seu pedido de apoio *#${targetId}* (${detalhesPedido}) acabou de ser avaliado.\n\n👤 *Apoio:* ${data.apoio || validPending.apoio}\n📊 *Status:* ${actionStatus}`;
+                        
                         await safeSend(client, formatId, msgFeedback);
                     } else {
                         console.log(`[AVISO] Coluna ID_NUMBER não encontrada ou vazia para o pedido #${targetId}.`);
