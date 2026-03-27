@@ -1,5 +1,5 @@
 //###################################################################################
-// src/handlers/schedulingFlow.js - VERSÃO DIRETA (LÊ COLUNA ID_NUMBER)
+// src/handlers/schedulingFlow.js - VERSÃO DIRETA COM FIX DE MINÚSCULAS
 //###################################################################################
 "use strict";
 
@@ -53,8 +53,8 @@ async function handleSchedulingFlow(client, senderId, dbId, bodyRaw, cfg) {
                 
                 // 2. Feedback ao Solicitante
                 try {
-                    // 👇 A MÁGICA ESTÁ AQUI: Vai buscar diretamente à sua coluna ID_NUMBER 👇
-                    const contatoSolicitante = data.ID_NUMBER || data.id_number || data.idNumber || validPending.ID_NUMBER || validPending.id_number || validPending.idNumber;
+                    // 👇 A MÁGICA ESTÁ AQUI: Vai buscar diretamente à sua coluna ID_NUMBER considerando a limpeza do normHeader 👇
+                    const contatoSolicitante = data.idnumber || validPending.idnumber || data.ID_NUMBER || data.id_number || data.idNumber || validPending.ID_NUMBER || validPending.id_number || validPending.idNumber;
                     
                     if (contatoSolicitante) {
                         // Limpa o "+" (caso exista) e garante a formatação correta para o WhatsApp
