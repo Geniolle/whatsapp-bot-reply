@@ -1,21 +1,32 @@
 ﻿//###################################################################################
-// src/handlers/onMessage.js - VERSÃO CLEAN ARCHITECTURE COM BUSCA 100% DINÂMICA
+// src/handlers/onMessage.js - BUSCA DINÂMICA VIA PROCESSO + CADEADO DE DEPARTAMENTOS
 //###################################################################################
 "use strict";
 
-const { getRules } = require("../services/responsesStore");
+const { getRules, buildHumanizedResponse } = require("../services/responsesStore");
 const { getAccessByChatId } = require("../services/bpLookup");
 const { logAudit } = require("../services/auditLogger");
 const { handleIntent } = require("./intentManager");
-const { isSpamming } = require("./onMessageUtils");
+const { isSpamming, getDayGreetingPt } = require("./onMessageUtils");
 const { getHistory, saveToHistory } = require("../services/memoryManager");
 
 const { executeProcess } = require("./processDispatcher");
-const { buildFinalReply, simulateTyping } = require("../utils/humanizer");
-const { checkDepartmentAccess } = require("../utils/permissions");
+const { checkDepartmentAccess } = require("../utils/permissions"); 
 
 function getFirstName(fullName) {
     return String(fullName || "").trim().split(/\s+/g)[0] || "Visitante";
+}
+
+function buildFinalReply(rawText, firstName, origem, aiData) {
+    let reply = rawText.replace(/\{nome\}/gi, firstName).replace(/\{saudacao_tempo\}/gi, getDayGreetingPt());
+    reply = buildHumanizedResponse(reply, firstName, getDayGreetingPt());
+    
+    const isGreeting = origem.includes("ID_1") || origem.includes("GREET") || aiData?.contexto?.toUpperCase().includes("SAUDACAO") || aiData?.id_table == "1";
+    if (isGreeting && !reply.includes(firstName)) {
+        const textoLimpo = reply.replace(/^(Olá|Oi|Ola|Oi!|Olá!)\s*,?\s*/i, "");
+        reply = `Olá ${firstName}! ${textoLimpo}`;
+    }
+    return reply;
 }
 
 function registerOnMessage_v5(client, cfg) {
@@ -43,7 +54,7 @@ function registerOnMessage_v5(client, cfg) {
             const firstName = getFirstName(fullName);
             const deptsAtribuidos = accData?.deptsDetalhado || []; 
 
-            // Lê as regras da planilha (Garantir que usa a versão nova do responsesStore.js)
+            // Força a leitura imediata das regras (sem cache temporário)
             const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, 0);
             const history = getHistory(dbId); 
             
@@ -61,32 +72,23 @@ function registerOnMessage_v5(client, cfg) {
                 let matchedRule = null;
 
                 const procIA = String(aiData?.processo || "").trim().toUpperCase();
-                
-                // ====================================================================
-                // >>> BUSCA DINÂMICA DA REGRA NA PLANILHA <<<
-                // ====================================================================
-                
-                // 1. Prioridade para Saudação
+
+                // >>> BUSCA DA REGRA <<<
                 if (aiData?.id_table == "1" || aiData?.contexto === "SAUDACAO") {
                     const key = isColab ? "GREET_COLAB" : "GREET_PUBLIC";
                     matchedRule = allRules.find(r => String(r.CHAVE || r.chave).toUpperCase() === key);
                 } 
-                // 2. BUSCA PELO PROCESSO (A FORMA CORRETA E DINÂMICA)
-                // Se a IA disse __APP_ENSAIO__, ele procura na coluna PROCESSO por __APP_ENSAIO__
+                // A BUSCA DINÂMICA: Procura a linha cujo PROCESSO corresponde ao detetado pela IA
                 else if (procIA && procIA !== "FAQ" && procIA !== "NENHUM") {
-                    matchedRule = allRules.find(r => String(r.PROCESSO || "").trim().toUpperCase() === procIA);
+                    matchedRule = allRules.find(r => String(r.PROCESSO).toUpperCase() === procIA);
                 } 
-                // 3. Fallback: ID da IA (Usado apenas para respostas estáticas)
                 else if (aiData?.id_table) {
                     matchedRule = allRules.find(r => String(r.ID_TABLE || r.id_table) === String(aiData.id_table));
                 }
 
-                // ====================================================================
-                // >>> FASE 0: VALIDAÇÃO DE ACESSO (O CADEADO) <<<
-                // ====================================================================
+                // >>> CADEADO DE ACESSO (DEPARTAMENTOS) <<<
                 if (matchedRule && matchedRule.DEPARTAMENTO) {
                     const perm = checkDepartmentAccess(deptsAtribuidos, matchedRule.DEPARTAMENTO);
-                    
                     if (!perm.hasAccess) {
                         rawText = `🔒 *Acesso Restrito*\n\nDesculpa, mas não tens permissão para ver isto. Esta informação é exclusiva para o departamento: *${perm.missingDept}*.`;
                         origem = "BLOQUEIO_DEPARTAMENTO";
@@ -94,16 +96,12 @@ function registerOnMessage_v5(client, cfg) {
                     }
                 }
 
-                // ====================================================================
-                // >>> FASE 1 e 2: EXECUÇÃO DO PROCESSO <<<
-                // ====================================================================
                 if (!isBlocked) {
                     if (aiData?.resposta && aiData.resposta !== "OK" && aiData.resposta.length > 2) {
                         rawText = aiData.resposta;
                         origem = "AI_CHAT";
                     }
 
-                    // Se for um processo dinâmico (ex: __APP_ENSAIO__), executa a função de ir buscar os dados
                     if (procIA && procIA !== "FAQ" && procIA !== "NENHUM") {
                         const procResult = await executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName); 
                         if (procResult.rawText) {
@@ -112,9 +110,8 @@ function registerOnMessage_v5(client, cfg) {
                         }
                     }
 
-                    // Se for apenas uma resposta estática da planilha
                     if (!rawText && matchedRule) {
-                        rawText = matchedRule.RESPOSTA || matchedRule.reply || "";
+                        rawText = matchedRule.RESPOSTA || "";
                         origem = `SHEET_RULE_${matchedRule.CHAVE || matchedRule.ID_TABLE}`;
                     }
                 }
@@ -124,13 +121,14 @@ function registerOnMessage_v5(client, cfg) {
                     origem = "FALLBACK_SEGURANCA";
                 }
 
-                // ====================================================================
-                // >>> FASE FINAL: ENVIO E LOGGER <<<
-                // ====================================================================
                 if (rawText) {
                     const finalReply = buildFinalReply(rawText, firstName, origem, aiData);
+
                     const chat = await message.getChat();
-                    await simulateTyping(chat, finalReply);
+                    await chat.sendStateTyping(); 
+                    let delayMs = finalReply.length > 60 ? Math.floor(Math.random() * 5000) + 15000 : 6000;
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+
                     await client.sendMessage(senderId, finalReply);
                     
                     saveToHistory(dbId, "user", bodyRaw);
@@ -138,10 +136,8 @@ function registerOnMessage_v5(client, cfg) {
                     
                     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
                     
-                    // Extrai o ID real encontrado na planilha (se não achar, avisa com N/A)
+                    // >>> LOGGER EXATO <<<
                     const logIdTable = matchedRule?.ID_TABLE || aiData?.id_table || "N/A";
-                    
-                    // Extrai o departamento real da planilha
                     let logContexto = "[Sem Restrição]";
                     if (matchedRule && matchedRule.DEPARTAMENTO && String(matchedRule.DEPARTAMENTO).trim() !== "") {
                         logContexto = String(matchedRule.DEPARTAMENTO).trim();
@@ -167,5 +163,4 @@ function registerOnMessage_v5(client, cfg) {
     });
 }
 
-function registerOnMessage_v4(client, cfg) { return registerOnMessage_v5(client, cfg); }
-module.exports = { registerOnMessage_v4, registerOnMessage_v5 };
+module.exports = { registerOnMessage_v5 };
