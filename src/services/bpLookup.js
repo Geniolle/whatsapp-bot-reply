@@ -1,5 +1,5 @@
 //###################################################################################
-// src/services/bpLookup.js
+// src/services/bpLookup.js - VERSÃO COM RBAC (Controlo de Acessos e Departamentos)
 //###################################################################################
 "use strict";
 
@@ -53,40 +53,17 @@ function findHeaderIndex_v1(headers, wanted) {
 function parseBoolLoose(v) {
   const t = stripBom(v).trim().toLowerCase();
   if (!t) return false;
-  return (
-    t === "true" ||
-    t === "1" ||
-    t === "sim" ||
-    t === "yes" ||
-    t === "y" ||
-    t === "s" ||
-    t === "x" ||
-    t === "ok" ||
-    t === "verdadeiro" ||
-    t === "v"
-  );
+  return [
+    "true", "1", "sim", "yes", "y", "s", "x", "ok", "verdadeiro", "v"
+  ].includes(t);
 }
 
 function isBooleanLike(v) {
   const t = stripBom(v).trim().toLowerCase();
   if (!t) return false;
   return [
-    "true",
-    "false",
-    "1",
-    "0",
-    "sim",
-    "nao",
-    "não",
-    "yes",
-    "no",
-    "y",
-    "n",
-    "x",
-    "ok",
-    "verdadeiro",
-    "falso",
-    "v",
+    "true", "false", "1", "0", "sim", "nao", "não", "yes", "no",
+    "y", "n", "x", "ok", "verdadeiro", "falso", "v"
   ].includes(t);
 }
 
@@ -128,19 +105,14 @@ function normalizeHeaderName_v1(h) {
 
 function isDeptHeader_v1(h) {
   const t = String(h || "").trim();
-  // aceitar "D." ou "D. " ou "D.QUALQUER"
   return /^D\.\s*/i.test(t);
 }
 
 function deptNameFromHeader_v1(h) {
-  // "D. LOUVOR" -> "LOUVOR"
   const t = normalizeHeaderName_v1(h);
   return t.replace(/^D\.\s*/i, "").trim();
 }
 
-/**
- * Converte um índice de coluna (0, 1, 2...) para notação A1 (A, B, C...)
- */
 function colToA1(idx) {
     let n = idx + 1;
     let s = "";
@@ -153,7 +125,7 @@ function colToA1(idx) {
 }
 
 //###################################################################################
-// Google Sheets client (service account)
+// Google Sheets client
 //###################################################################################
 let sheetsClient = null;
 
@@ -187,9 +159,7 @@ async function readRange_v1(spreadsheetId, rangeA1) {
 }
 
 //###################################################################################
-// Public: acesso completo (fullName, isColab, deptsAccess, depts) pelo chatId
-// - isColab: true se COLAB/TYPE/ACCESS ou se DEPARTAMENTOS=true/lista
-// - depts: lista dinâmica a partir de colunas "D.*" com valor true na linha encontrada
+// Public: getAccessByChatId
 //###################################################################################
 async function getAccessByChatId({
   spreadsheetId,
@@ -198,7 +168,7 @@ async function getAccessByChatId({
   cacheSeconds,
   debugRowLog,
 }) {
-  const key = `bpacc:v8:${spreadsheetId}:${sheetNameBp}:${chatId}`;
+  const key = `bpacc:v9:${spreadsheetId}:${sheetNameBp}:${chatId}`;
 
   if (debugRowLog !== true) {
     const cached = cacheGet(key);
@@ -212,7 +182,7 @@ async function getAccessByChatId({
   const range = `'${sheetNameBp}'!A:ZZ`;
   const rows = await readRange_v1(spreadsheetId, range);
 
-  const empty = { fullName: "", isColab: false, deptsAccess: false, depts: [] };
+  const empty = { fullName: "", isColab: false, deptsAccess: false, depts: [], deptsDetalhado: [] };
   if (!rows || rows.length < 2) {
     cacheSet(key, empty, cacheSeconds);
     return empty;
@@ -221,37 +191,18 @@ async function getAccessByChatId({
   const headerRow = rows[0];
 
   const idxTelefone = findHeaderIndex_v1(headerRow, ["TELEFONE"]);
-  const idxNumberWp = findHeaderIndex_v1(headerRow, [
-    "NUMBER_WHATSAPP",
-    "NUMBER WHATSAPP",
-    "WHATSAPP",
-    "WHATSAPP_NUMBER",
-  ]);
-
-  const idxNome = findHeaderIndex_v1(headerRow, [
-    "NOME",
-    "NOME COMPLETO",
-    "NOME_COMPLETO",
-    "PRIMEIRO NOME",
-    "FIRST_NAME",
-    "FIRST NAME",
-    "FULL_NAME",
-    "FULL NAME",
-    "NAME",
-  ]);
-
+  const idxNumberWp = findHeaderIndex_v1(headerRow, ["NUMBER_WHATSAPP", "NUMBER WHATSAPP", "WHATSAPP", "WHATSAPP_NUMBER"]);
+  const idxNome = findHeaderIndex_v1(headerRow, ["NOME", "NOME COMPLETO", "NOME_COMPLETO", "PRIMEIRO NOME", "FIRST_NAME", "FULL_NAME", "NAME"]);
   const idxType = findHeaderIndex_v1(headerRow, ["TYPE", "TIPO"]);
   const idxAccess = findHeaderIndex_v1(headerRow, ["ACCESS", "ACESSO"]);
   const idxColab = findHeaderIndex_v1(headerRow, ["COLAB", "IS_COLAB", "COLABORADOR"]);
   const idxDeptsFlag = findHeaderIndex_v1(headerRow, ["DEPARTAMENTOS", "DEPARTAMENTO", "DEPTS"]);
 
   if (idxTelefone < 0 && idxNumberWp < 0) {
-    throw new Error(
-      `[BP_LOOKUP] Cabeçalho sem telefone. Esperado [TELEFONE] ou [NUMBER_WHATSAPP]. sheet=${sheetNameBp}`
-    );
+    throw new Error(`[BP_LOOKUP] Cabeçalho sem telefone na sheet=${sheetNameBp}`);
   }
 
-  // Pré-mapa: índices das colunas "D.*" (departamentos dinâmicos)
+  // Mapear colunas de departamentos (D.*)
   const deptCols = [];
   for (let i = 0; i < headerRow.length; i++) {
     const h = normalizeHeaderName_v1(headerRow[i]);
@@ -262,9 +213,8 @@ async function getAccessByChatId({
 
   const chatNum = chatIdToNumber_v1(chatId);
 
-  let result = { fullName: "", isColab: false, deptsAccess: false, depts: [] };
+  let result = empty;
   let foundRowIndex = -1;
-  let foundRow = null;
 
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r] || [];
@@ -276,23 +226,38 @@ async function getAccessByChatId({
 
     if (telA === chatNum || telB === chatNum) {
       const fullName = idxNome >= 0 ? stripBom(row[idxNome]).trim() : "";
-
       const type = idxType >= 0 ? stripBom(row[idxType]).trim().toUpperCase() : "";
       const access = idxAccess >= 0 ? stripBom(row[idxAccess]).trim().toUpperCase() : "";
       const colabFlag = idxColab >= 0 ? parseBoolLoose(row[idxColab]) : false;
 
-      // DEPARTAMENTOS (flag/lista)
       const deptsFlagRaw = idxDeptsFlag >= 0 ? row[idxDeptsFlag] : "";
       const { deptsAccess } = idxDeptsFlag >= 0
         ? parseDeptsSmart(deptsFlagRaw)
         : { deptsAccess: false, depts: [] };
 
-      // DEPARTAMENTOS por colunas "D.*" true
+      // >>> LÓGICA DE DEPARTAMENTOS INTELIGENTE <<<
       const depts = [];
+      const deptsDetalhado = [];
+
       for (const c of deptCols) {
-        const v = row[c.idx];
-        if (parseBoolLoose(v)) {
-          if (c.name) depts.push(c.name);
+        const valRaw = row[c.idx] || "";
+        const v = stripBom(valRaw).trim();
+        
+        if (v) {
+          const lowerV = v.toLowerCase();
+          // Ignora se for "não", "false", "-", etc.
+          if (["nao", "não", "false", "0", "n", "falso", "-"].includes(lowerV)) continue;
+
+          // Define o nível: se a pessoa escreveu "sim" ou "x", assume "MEMBRO". Senão, assume o que ela escreveu (ex: "GESTOR")
+          let nivel = "MEMBRO";
+          if (!["sim", "true", "1", "y", "s", "x", "ok", "verdadeiro", "v"].includes(lowerV)) {
+            nivel = v.toUpperCase();
+          }
+
+          if (c.name) {
+            depts.push(c.name); // Lista simples antiga para retrocompatibilidade
+            deptsDetalhado.push({ nome: c.name, nivel: nivel }); // Objeto novo com permissões
+          }
         }
       }
 
@@ -303,35 +268,23 @@ async function getAccessByChatId({
         type.startsWith("COLAB") ||
         access.startsWith("COLAB") ||
         deptsAccess === true ||
-        depts.length > 0; // se tem algum D.* true, também é colaborador
+        depts.length > 0;
 
-      result = { fullName, isColab, deptsAccess, depts };
-      foundRowIndex = r + 1; // 1-based
-      foundRow = row;
+      result = { fullName, isColab, deptsAccess, depts, deptsDetalhado };
+      foundRowIndex = r + 1;
+
+      // >>> LOGGER SOLICITADO (Mostra os departamentos e funções) <<<
+      if (isColab) {
+          const deptsLog = deptsDetalhado.length > 0 
+              ? deptsDetalhado.map(d => `${d.nome} [${d.nivel}]`).join(", ") 
+              : "Sem departamentos atribuídos";
+              
+          console.log(`\n---------------------------------------------------------`);
+          console.log(`[BP_LOOKUP] 🟢 COLAB IDENTIFICADO: ${fullName}`);
+          console.log(`[BP_LOOKUP] 🏢 PERTENCE A: ${deptsLog}`);
+          console.log(`---------------------------------------------------------\n`);
+      }
       break;
-    }
-  }
-
-  //#################################################################################
-  // Logger: linha encontrada (ou NOT_FOUND)
-  //#################################################################################
-  if (debugRowLog === true) {
-    if (foundRowIndex > 0) {
-      const telAraw = idxTelefone >= 0 ? foundRow[idxTelefone] : "";
-      const telBraw = idxNumberWp >= 0 ? foundRow[idxNumberWp] : "";
-      const telA = idxTelefone >= 0 ? onlyDigits_v1(telAraw) : "";
-      const telB = idxNumberWp >= 0 ? onlyDigits_v1(telBraw) : "";
-
-      console.log(
-        `[BP_ROW] sheet=${sheetNameBp} line=${foundRowIndex} chat=${chatId} chatNum=${maskDigits(chatNum)} ` +
-          `TEL_A(raw)="${safeCell(telAraw, 60)}" TEL_A(dig)="${maskDigits(telA)}" ` +
-          `TEL_B(raw)="${safeCell(telBraw, 60)}" TEL_B(dig)="${maskDigits(telB)}" ` +
-          `fullName="${safeCell(result.fullName, 140)}" ` +
-          `deptsAccess=${result.deptsAccess} depts=${result.depts.join("|")} ` +
-          `isColab=${result.isColab} deptCols=${deptCols.length}`
-      );
-    } else {
-      console.log(`[BP_ROW] sheet=${sheetNameBp} chat=${chatId} chatNum=${maskDigits(chatNum)} NOT_FOUND`);
     }
   }
 
@@ -340,7 +293,7 @@ async function getAccessByChatId({
 }
 
 //###################################################################################
-// NOVO: Desativação de Mensagens (Opt-out)
+// Desativação de Mensagens (Opt-out)
 //###################################################################################
 async function desativarMensagensWS(spreadsheetId, sheetNameBp, telefone) {
     try {
@@ -396,5 +349,5 @@ module.exports = {
   getAccessByChatId,
   getFullNameByChatId,
   getFirstNameByChatId, 
-  desativarMensagensWS // Exportado para uso no onMessage.js
+  desativarMensagensWS
 };

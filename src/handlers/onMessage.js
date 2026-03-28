@@ -1,135 +1,22 @@
 ﻿//###################################################################################
-// src/handlers/onMessage.js - VERSÃO CLEAN CODE + TYPING SIMULATOR + BLINDAGEM IA
+// src/handlers/onMessage.js - VERSÃO CLEAN ARCHITECTURE COM BUSCA 100% DINÂMICA
 //###################################################################################
 "use strict";
 
-const { getRules, buildHumanizedResponse } = require("../services/responsesStore");
+const { getRules } = require("../services/responsesStore");
 const { getAccessByChatId } = require("../services/bpLookup");
 const { logAudit } = require("../services/auditLogger");
 const { handleIntent } = require("./intentManager");
-const { isSpamming, getDayGreetingPt } = require("./onMessageUtils");
+const { isSpamming } = require("./onMessageUtils");
 const { getHistory, saveToHistory } = require("../services/memoryManager");
 
-// ============================================================================
-// FUNÇÕES AUXILIARES
-// ============================================================================
+const { executeProcess } = require("./processDispatcher");
+const { buildFinalReply, simulateTyping } = require("../utils/humanizer");
+const { checkDepartmentAccess } = require("../utils/permissions");
 
 function getFirstName(fullName) {
     return String(fullName || "").trim().split(/\s+/g)[0] || "Visitante";
 }
-
-async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
-    let rawText = "";
-    let origem = "AI_GENERICA";
-
-    // 1. PESQUISA GERAL DE LIVRARIA (Título, Misto, ou invenções da IA)
-    if (
-        aiData?.processo === "LIVRARIA" || 
-        (aiData?.processo?.includes("LIVRARIA") && !aiData?.processo?.includes("AUTORES") && !aiData?.processo?.includes("EDITORAS") && !aiData?.processo?.includes("PESQUISA_"))
-    ) {
-        try {
-            const libService = require("../services/appLivraria");
-            const targetSheet = (cfg.sheetNameLivraria || process.env.SHEET_NAME_LIVRARIA || "DB_STOCK").trim();
-            const livrariaSpreadsheetId = process.env.SPREADSHEET_LIVRARIA_ID || cfg.spreadsheetLivrariaId;
-
-            if (!livrariaSpreadsheetId) throw new Error("SPREADSHEET_LIVRARIA_ID não configurado no .env");
-
-            // CORREÇÃO DO BUG DO CATÁLOGO VAZIO:
-            // Se aiData.termo existir (mesmo que seja ""), usa-o. Só usa o bodyRaw se for null/undefined.
-            const termoFinal = (aiData.termo !== undefined && aiData.termo !== null) ? aiData.termo : bodyRaw;
-
-            rawText = await libService.getLivrosEmStock_v1({
-                spreadsheetId: livrariaSpreadsheetId,
-                sheetName: targetSheet,
-                searchTerm: termoFinal
-            });
-            origem = "DB_LIVRARIA";
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Livraria: ${e.message}`, isColab });
-        }
-    } 
-    // 2. LISTAGEM DE AUTORES OU EDITORAS
-    else if (aiData?.processo === "__APP_LIVRARIA_AUTORES__" || aiData?.processo === "__APP_LIVRARIA_EDITORAS__") {
-        try {
-            const libService = require("../services/appLivraria");
-            const targetSheet = (cfg.sheetNameLivraria || process.env.SHEET_NAME_LIVRARIA || "DB_STOCK").trim();
-            const livrariaSpreadsheetId = process.env.SPREADSHEET_LIVRARIA_ID || cfg.spreadsheetLivrariaId;
-
-            if (!livrariaSpreadsheetId) throw new Error("SPREADSHEET_LIVRARIA_ID não configurado no .env");
-
-            const tipoLista = aiData.processo === "__APP_LIVRARIA_AUTORES__" ? "AUTORES" : "EDITORAS";
-
-            rawText = await libService.getListasLivraria_v1({
-                spreadsheetId: livrariaSpreadsheetId,
-                sheetName: targetSheet,
-                tipo: tipoLista
-            });
-            origem = `DB_LIVRARIA_${tipoLista}`;
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Livraria Listas: ${e.message}`, isColab });
-        }
-    }
-    // 3. PESQUISA EXCLUSIVA POR AUTOR OU EDITORA
-    else if (aiData?.processo === "__APP_LIVRARIA_PESQUISA_AUTOR__" || aiData?.processo === "__APP_LIVRARIA_PESQUISA_EDITORA__") {
-        try {
-            const libService = require("../services/appLivraria");
-            const targetSheet = (cfg.sheetNameLivraria || process.env.SHEET_NAME_LIVRARIA || "DB_STOCK").trim();
-            const livrariaSpreadsheetId = process.env.SPREADSHEET_LIVRARIA_ID || cfg.spreadsheetLivrariaId;
-
-            if (!livrariaSpreadsheetId) throw new Error("SPREADSHEET_LIVRARIA_ID não configurado no .env");
-
-            const tipoFiltro = aiData.processo === "__APP_LIVRARIA_PESQUISA_AUTOR__" ? "AUTOR" : "EDITORA";
-            const termoFinalExclusivo = (aiData.termo !== undefined && aiData.termo !== null) ? aiData.termo : bodyRaw;
-
-            rawText = await libService.getLivrosExclusivos_v1({
-                spreadsheetId: livrariaSpreadsheetId,
-                sheetName: targetSheet,
-                tipoFiltro: tipoFiltro,
-                termoPesquisa: termoFinalExclusivo
-            });
-            origem = `DB_LIVRARIA_EXCLUSIVO_${tipoFiltro}`;
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Livraria Exclusiva: ${e.message}`, isColab });
-        }
-    }
-    // 4. AUSÊNCIAS / FÉRIAS
-    else if (aiData?.processo === "__AUSENCIAS__") {
-        try {
-            const ausenciasService = require("../services/appAusencias");
-            rawText = await ausenciasService.getMinhasAusencias_v1({ 
-                chatId: dbId, 
-                fullName: fullName 
-            });
-            origem = "DB_AUSENCIAS";
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Ausências: ${e.message}`, isColab });
-            rawText = "Desculpa, ocorreu um erro ao consultar as tuas ausências na base de dados.";
-        }
-    }
-    
-    return { rawText, origem };
-}
-
-function buildFinalReply(rawText, firstName, origem, aiData) {
-    let reply = rawText
-        .replace(/\{nome\}/gi, firstName)
-        .replace(/\{saudacao_tempo\}/gi, getDayGreetingPt());
-
-    reply = buildHumanizedResponse(reply, firstName, getDayGreetingPt());
-    
-    const isGreeting = origem.includes("ID_1") || origem.includes("GREET") || aiData.contexto?.toUpperCase().includes("SAUDACAO") || aiData.id_table == "1";
-    
-    if (isGreeting && !reply.includes(firstName)) {
-        const textoLimpo = reply.replace(/^(Olá|Oi|Ola|Oi!|Olá!)\s*,?\s*/i, "");
-        reply = `Olá ${firstName}! ${textoLimpo}`;
-    }
-
-    return reply;
-}
-
-// ============================================================================
-// ORQUESTRADOR PRINCIPAL
-// ============================================================================
 
 function registerOnMessage_v5(client, cfg) {
     client.on("message", async (message) => {
@@ -147,13 +34,17 @@ function registerOnMessage_v5(client, cfg) {
             const accData = await getAccessByChatId({ 
                 spreadsheetId: cfg.spreadsheetId, 
                 sheetNameBp: cfg.sheetNameBp, 
-                chatId: dbId 
+                chatId: dbId,
+                cacheSeconds: 0 
             });
 
             const isColab = !!accData?.isColab;
             const fullName = accData?.fullName;
             const firstName = getFirstName(fullName);
-            const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, cfg.cacheSeconds);
+            const deptsAtribuidos = accData?.deptsDetalhado || []; 
+
+            // Lê as regras da planilha (Garantir que usa a versão nova do responsesStore.js)
+            const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, 0);
             const history = getHistory(dbId); 
             
             logAudit({ type: "TRACE_RX", chatId: dbId, msg: bodyRaw, isColab });
@@ -166,82 +57,107 @@ function registerOnMessage_v5(client, cfg) {
                 const aiData = intent.result;
                 let rawText = "";
                 let origem = "AI_GENERICA";
+                let isBlocked = false;
+                let matchedRule = null;
 
-                // --- FASE 1: Resposta Fluida da IA ---
-                if (aiData?.resposta && aiData.resposta !== "OK" && aiData.resposta.length > 2) {
-                    rawText = aiData.resposta;
-                    origem = "AI_CHAT";
+                const procIA = String(aiData?.processo || "").trim().toUpperCase();
+                
+                // ====================================================================
+                // >>> BUSCA DINÂMICA DA REGRA NA PLANILHA <<<
+                // ====================================================================
+                
+                // 1. Prioridade para Saudação
+                if (aiData?.id_table == "1" || aiData?.contexto === "SAUDACAO") {
+                    const key = isColab ? "GREET_COLAB" : "GREET_PUBLIC";
+                    matchedRule = allRules.find(r => String(r.CHAVE || r.chave).toUpperCase() === key);
+                } 
+                // 2. BUSCA PELO PROCESSO (A FORMA CORRETA E DINÂMICA)
+                // Se a IA disse __APP_ENSAIO__, ele procura na coluna PROCESSO por __APP_ENSAIO__
+                else if (procIA && procIA !== "FAQ" && procIA !== "NENHUM") {
+                    matchedRule = allRules.find(r => String(r.PROCESSO || "").trim().toUpperCase() === procIA);
+                } 
+                // 3. Fallback: ID da IA (Usado apenas para respostas estáticas)
+                else if (aiData?.id_table) {
+                    matchedRule = allRules.find(r => String(r.ID_TABLE || r.id_table) === String(aiData.id_table));
                 }
 
-                // --- FASE 2: Processos Dinâmicos (Livraria, Listas, Ausências) ---
-                if (aiData?.processo && aiData.processo !== "FAQ" && aiData.processo !== "NENHUM") {
-                    const procResult = await executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName); 
+                // ====================================================================
+                // >>> FASE 0: VALIDAÇÃO DE ACESSO (O CADEADO) <<<
+                // ====================================================================
+                if (matchedRule && matchedRule.DEPARTAMENTO) {
+                    const perm = checkDepartmentAccess(deptsAtribuidos, matchedRule.DEPARTAMENTO);
                     
-                    if (procResult.rawText) {
-                        if (rawText && rawText !== "OK") {
-                            rawText = `${rawText}\n\n${procResult.rawText}`;
-                        } else {
-                            rawText = procResult.rawText;
+                    if (!perm.hasAccess) {
+                        rawText = `🔒 *Acesso Restrito*\n\nDesculpa, mas não tens permissão para ver isto. Esta informação é exclusiva para o departamento: *${perm.missingDept}*.`;
+                        origem = "BLOQUEIO_DEPARTAMENTO";
+                        isBlocked = true; 
+                    }
+                }
+
+                // ====================================================================
+                // >>> FASE 1 e 2: EXECUÇÃO DO PROCESSO <<<
+                // ====================================================================
+                if (!isBlocked) {
+                    if (aiData?.resposta && aiData.resposta !== "OK" && aiData.resposta.length > 2) {
+                        rawText = aiData.resposta;
+                        origem = "AI_CHAT";
+                    }
+
+                    // Se for um processo dinâmico (ex: __APP_ENSAIO__), executa a função de ir buscar os dados
+                    if (procIA && procIA !== "FAQ" && procIA !== "NENHUM") {
+                        const procResult = await executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName); 
+                        if (procResult.rawText) {
+                            rawText = (rawText && rawText !== "OK") ? `${rawText}\n\n${procResult.rawText}` : procResult.rawText;
+                            origem = procResult.origem;
                         }
-                        origem = procResult.origem;
+                    }
+
+                    // Se for apenas uma resposta estática da planilha
+                    if (!rawText && matchedRule) {
+                        rawText = matchedRule.RESPOSTA || matchedRule.reply || "";
+                        origem = `SHEET_RULE_${matchedRule.CHAVE || matchedRule.ID_TABLE}`;
                     }
                 }
 
-                // --- FASE 3: Fallback da Planilha Estática ---
-                if (!rawText && aiData?.id_table) {
-                    let rule;
-                    if (aiData.id_table == "1" || aiData.contexto === "SAUDACAO") {
-                        const key = isColab ? "GREET_COLAB" : "GREET_PUBLIC";
-                        rule = allRules.find(r => (r.CHAVE || r.chave) === key);
-                    }
-                    if (!rule) {
-                        rule = allRules.find(r => String(r.ID_TABLE || r.id_table) === String(aiData.id_table));
-                    }
-
-                    if (rule) {
-                        rawText = rule.RESPOSTA || rule.reply || "";
-                        origem = `SHEET_RULE_${rule.CHAVE || aiData.id_table}`;
-                    }
-                }
-
-                // 👇 FASE 3.5: REDE DE SEGURANÇA (Prevenção de bot mudo) 👇
                 if (!rawText || rawText.trim() === "OK") {
                     rawText = "Desculpa, não entendi bem. Podes tentar perguntar de outra forma?";
                     origem = "FALLBACK_SEGURANCA";
                 }
 
-                // --- FASE 4: Finalização e Envio ---
+                // ====================================================================
+                // >>> FASE FINAL: ENVIO E LOGGER <<<
+                // ====================================================================
                 if (rawText) {
                     const finalReply = buildFinalReply(rawText, firstName, origem, aiData);
-
-                    // --- SIMULADOR DE DIGITAÇÃO HUMANA ---
                     const chat = await message.getChat();
-                    await chat.sendStateTyping(); 
-
-                    let delayMs = 6000; 
-                    if (finalReply.length > 60) {
-                        delayMs = Math.floor(Math.random() * (20000 - 15000 + 1)) + 15000;
-                    }
-
-                    await new Promise(resolve => setTimeout(resolve, delayMs));
-                    // -------------------------------------
-
+                    await simulateTyping(chat, finalReply);
                     await client.sendMessage(senderId, finalReply);
                     
                     saveToHistory(dbId, "user", bodyRaw);
                     saveToHistory(dbId, "assistant", finalReply);
                     
                     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+                    
+                    // Extrai o ID real encontrado na planilha (se não achar, avisa com N/A)
+                    const logIdTable = matchedRule?.ID_TABLE || aiData?.id_table || "N/A";
+                    
+                    // Extrai o departamento real da planilha
+                    let logContexto = "[Sem Restrição]";
+                    if (matchedRule && matchedRule.DEPARTAMENTO && String(matchedRule.DEPARTAMENTO).trim() !== "") {
+                        logContexto = String(matchedRule.DEPARTAMENTO).trim();
+                    }
+
                     logAudit({ 
                         type: "AUDITORIA", 
                         chatId: firstName, 
                         isColab,
+                        depts: deptsAtribuidos,
                         msg: bodyRaw, 
                         response: finalReply,
-                        idTable: aiData?.id_table, 
-                        context: aiData?.contexto, 
+                        idTable: logIdTable, 
+                        context: logContexto, 
                         origem: origem,
-                        process: `${aiData?.processo || 'IA'} (${duration}s)` 
+                        process: `${procIA || 'IA'} (${duration}s)` 
                     });
                 }
             }
@@ -251,4 +167,5 @@ function registerOnMessage_v5(client, cfg) {
     });
 }
 
-module.exports = { registerOnMessage_v5 };
+function registerOnMessage_v4(client, cfg) { return registerOnMessage_v5(client, cfg); }
+module.exports = { registerOnMessage_v4, registerOnMessage_v5 };
