@@ -1,5 +1,5 @@
 ﻿//###################################################################################
-// src/services/sheets.js - VERSÃO DEFINITIVA COM AUTENTICAÇÃO E ALIAS
+// src/services/sheets.js - VERSÃO DEFINITIVA COM AUTENTICAÇÃO, ALIAS E AUDITORIA
 //###################################################################################
 "use strict";
 
@@ -14,7 +14,7 @@ const fs = require("fs");
 function getCredentialsPath() {
     const path1 = path.join(process.cwd(), "credentials", "service-account.json");
     const path2 = path.join(process.cwd(), "service-account.json");
-    const path3 = path.join(process.cwd(), "credentials.json"); // Nome comum
+    const path3 = path.join(process.cwd(), "credentials.json");
 
     if (fs.existsSync(path1)) return path1;
     if (fs.existsSync(path2)) return path2;
@@ -51,24 +51,57 @@ async function readRange(spreadsheetId, rangeA1) {
             range: cleanRange,
         });
 
+        console.log(`[AUDITORIA] Leitura realizada com sucesso | Range: ${cleanRange}`);
         return res.data.values || [];
     } catch (error) {
-        console.error(`\x1b[31m[SHEETS_READ_ERR]\x1b[0m Range: ${rangeA1} | Erro: ${error.message}`);
+        console.error(`\x1b[31m[ERRO_AUDITORIA] [SHEETS_READ_ERR]\x1b[0m Range: ${rangeA1} | Erro: ${error.message}`);
         throw error;
     }
 }
 
 async function appendRow(spreadsheetId, sheetName, rowValues) {
-    const auth = await getAuth().getClient();
-    const sheets = google.sheets({ version: "v4", auth });
+    try {
+        const auth = await getAuth().getClient();
+        const sheets = google.sheets({ version: "v4", auth });
 
-    await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: `${sheetName}!A:D`,
-        valueInputOption: "RAW",
-        insertDataOption: "INSERT_ROWS",
-        requestBody: { values: [rowValues] },
-    });
+        await sheets.spreadsheets.values.append({
+            spreadsheetId,
+            range: `${sheetName}!A:D`,
+            valueInputOption: "RAW",
+            insertDataOption: "INSERT_ROWS",
+            requestBody: { values: [rowValues] },
+        });
+        console.log(`[AUDITORIA] Nova linha adicionada com sucesso | Aba: ${sheetName}`);
+    } catch (error) {
+        console.error(`\x1b[31m[ERRO_AUDITORIA] [SHEETS_APPEND_ERR]\x1b[0m Aba: ${sheetName} | Erro: ${error.message}`);
+        throw error;
+    }
+}
+
+/**
+ * NOVA FUNÇÃO: Escreve ou atualiza células específicas/intervalos (Requisitada pelo VIGIA)
+ */
+async function writeCells(spreadsheetId, rangeA1, values) {
+    try {
+        const auth = await getAuth().getClient();
+        const sheets = google.sheets({ version: "v4", auth });
+
+        // Garante que os values estejam num formato bidimensional array [][]
+        const valuesFormatados = Array.isArray(values[0]) ? values : [values];
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: rangeA1,
+            valueInputOption: "RAW",
+            requestBody: {
+                values: valuesFormatados,
+            },
+        });
+        console.log(`[AUDITORIA] Células atualizadas com sucesso | Range: ${rangeA1}`);
+    } catch (error) {
+        console.error(`\x1b[31m[ERRO_AUDITORIA] [SHEETS_WRITE_ERR]\x1b[0m Range: ${rangeA1} | Erro: ${error.message}`);
+        throw error;
+    }
 }
 
 // ==========================================
@@ -76,43 +109,50 @@ async function appendRow(spreadsheetId, sheetName, rowValues) {
 // ==========================================
 
 async function updateStatusById(spreadsheetId, sheetName, idPedido, novoStatus) {
-    const auth = await getAuth().getClient();
-    const sheets = google.sheets({ version: "v4", auth });
+    try {
+        const auth = await getAuth().getClient();
+        const sheets = google.sheets({ version: "v4", auth });
 
-    const rows = await readRange(spreadsheetId, `'${sheetName}'!A:ZZ`);
-    if (!rows.length) return false;
+        const rows = await readRange(spreadsheetId, `'${sheetName}'!A:ZZ`);
+        if (!rows.length) return false;
 
-    const header = rows[0];
-    const idxId = header.indexOf("ID_PEDIDO");
-    const idxStatus = header.indexOf("STATUS");
-    const idxTimestamp = header.indexOf("TIMESTEMP") || header.indexOf("TIMESTAMP");
+        const header = rows[0];
+        const idxId = header.indexOf("ID_PEDIDO");
+        const idxStatus = header.indexOf("STATUS");
+        const idxTimestamp = header.indexOf("TIMESTEMP") || header.indexOf("TIMESTAMP");
 
-    const rowIndex = rows.findIndex(r => r[idxId] == idPedido) + 1;
+        const rowIndex = rows.findIndex(r => r[idxId] == idPedido) + 1;
 
-    if (rowIndex > 0) {
-        // Coluna Status
-        const colLetterStatus = String.fromCharCode(65 + idxStatus);
-        await sheets.spreadsheets.values.update({
-            spreadsheetId,
-            range: `${sheetName}!${colLetterStatus}${rowIndex}`,
-            valueInputOption: "RAW",
-            requestBody: { values: [[novoStatus]] },
-        });
-
-        // Coluna Timestamp
-        if (idxTimestamp >= 0) {
-            const colLetterTime = String.fromCharCode(65 + idxTimestamp);
-            const agora = new Date().toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" });
+        if (rowIndex > 0) {
+            // Coluna Status
+            const colLetterStatus = String.fromCharCode(65 + idxStatus);
             await sheets.spreadsheets.values.update({
                 spreadsheetId,
-                range: `${sheetName}!${colLetterTime}${rowIndex}`,
+                range: `${sheetName}!${colLetterStatus}${rowIndex}`,
                 valueInputOption: "RAW",
-                requestBody: { values: [[agora]] },
+                requestBody: { values: [[novoStatus]] },
             });
+
+            // Coluna Timestamp
+            if (idxTimestamp >= 0) {
+                const colLetterTime = String.fromCharCode(65 + idxTimestamp);
+                const agora = new Date().toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" });
+                await sheets.spreadsheets.values.update({
+                    spreadsheetId,
+                    range: `${sheetName}!${colLetterTime}${rowIndex}`,
+                    valueInputOption: "RAW",
+                    requestBody: { values: [[agora]] },
+                });
+            }
+            
+            console.log(`[AUDITORIA] Status atualizado | ID: ${idPedido} -> ${novoStatus}`);
+            return true;
         }
-        return true;
+        return false;
+    } catch (error) {
+        console.error(`\x1b[31m[ERRO_AUDITORIA] [SHEETS_UPDATE_STATUS_ERR]\x1b[0m ID: ${idPedido} | Erro: ${error.message}`);
+        throw error;
     }
-    return false;
 }
 
 async function getNextInBatch(spreadsheetId, sheetName, solicitante, apoio) {
@@ -133,22 +173,28 @@ async function getNextInBatch(spreadsheetId, sheetName, solicitante, apoio) {
         (String(r[idxStatus]).includes("Aguardando") || String(r[idxStatus]).includes("Em espera"))
     );
 
-    return nextRow ? {
-        id: nextRow[idxId],
-        detalhes: nextRow[idxDet],
-        solicitante: nextRow[idxSol],
-        apoio: nextRow[idxApoio]
-    } : null;
+    if (nextRow) {
+        console.log(`[AUDITORIA] Próximo do lote encontrado | ID: ${nextRow[idxId]}`);
+        return {
+            id: nextRow[idxId],
+            detalhes: nextRow[idxDet],
+            solicitante: nextRow[idxSol],
+            apoio: nextRow[idxApoio]
+        };
+    }
+    
+    return null;
 }
 
 /**
- * ALIAS: Define readSheet como um sinônimo de readRange para evitar erros no Vigia.
+ * ALIAS: Define readSheet como um sinónimo de readRange
  */
 const readSheet = readRange;
 
 module.exports = { 
     readRange, 
     appendRow, 
+    writeCells, // <-- ADICIONADO E EXPORTADO AQUI!
     readSheet, 
     updateStatusById, 
     getNextInBatch 
