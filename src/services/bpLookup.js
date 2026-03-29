@@ -1,5 +1,5 @@
 //###################################################################################
-// src/services/bpLookup.js - VERSÃO COM RBAC (Controlo de Acessos e Departamentos)
+// src/services/bpLookup.js - VERSÃO COM RBAC + IDENTIFICAÇÃO DE MANAGERS
 //###################################################################################
 "use strict";
 
@@ -41,9 +41,24 @@ function chatIdToNumber_v1(chatId) {
   return onlyDigits_v1(String(chatId || "").split("@")[0]);
 }
 
+function normalizeText_v1(s) {
+  return stripBom(s)
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function normalizeDeptKey_v1(s) {
+  let t = normalizeText_v1(s);
+  t = t.replace(/^D\.\s*/i, "").replace(/^D\s+/i, "").trim();
+  return t;
+}
+
 function findHeaderIndex_v1(headers, wanted) {
-  const H = (headers || []).map((h) => stripBom(h).trim().toUpperCase());
-  const W = (wanted || []).map((w) => stripBom(w).trim().toUpperCase());
+  const H = (headers || []).map((h) => normalizeText_v1(h));
+  const W = (wanted || []).map((w) => normalizeText_v1(w));
   for (let i = 0; i < H.length; i++) {
     if (W.includes(H[i])) return i;
   }
@@ -83,22 +98,16 @@ function parseDeptsSmart(v) {
   return { deptsAccess: depts.length > 0, depts };
 }
 
+function parseDeptListCell_v1(v) {
+  return String(v || "")
+    .split(/[;,|]+/g)
+    .map((x) => normalizeDeptKey_v1(x))
+    .filter(Boolean);
+}
+
 //###################################################################################
 // Logger helpers
 //###################################################################################
-function safeCell(v, maxLen) {
-  const s = stripBom(v).replace(/\s+/g, " ").trim();
-  if (!s) return "";
-  const m = Number(maxLen || 140);
-  return s.length > m ? s.slice(0, m) + "…" : s;
-}
-
-function maskDigits(s) {
-  const d = onlyDigits_v1(s);
-  if (d.length <= 4) return d;
-  return d.slice(0, 2) + "****" + d.slice(-2);
-}
-
 function normalizeHeaderName_v1(h) {
   return stripBom(h).replace(/\s+/g, " ").trim();
 }
@@ -114,14 +123,14 @@ function deptNameFromHeader_v1(h) {
 }
 
 function colToA1(idx) {
-    let n = idx + 1;
-    let s = "";
-    while (n > 0) {
-      let m = (n - 1) % 26;
-      s = String.fromCharCode(65 + m) + s;
-      n = Math.floor((n - 1) / 26);
-    }
-    return s;
+  let n = idx + 1;
+  let s = "";
+  while (n > 0) {
+    let m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
 
 //###################################################################################
@@ -159,6 +168,83 @@ async function readRange_v1(spreadsheetId, rangeA1) {
 }
 
 //###################################################################################
+// Manager lookup
+//###################################################################################
+async function getManagerDeptsByChatId_v1({
+  spreadsheetId,
+  sheetNameManager,
+  chatId,
+}) {
+  if (!sheetNameManager) return [];
+
+  const range = `'${sheetNameManager}'!A:ZZ`;
+  const rows = await readRange_v1(spreadsheetId, range);
+  if (!rows || rows.length < 2) return [];
+
+  const headerRow = rows[0] || [];
+  const idxTelefone = findHeaderIndex_v1(headerRow, ["TELEFONE"]);
+  const idxNumberWp = findHeaderIndex_v1(headerRow, ["NUMBER_WHATSAPP", "NUMBER WHATSAPP", "WHATSAPP", "WHATSAPP_NUMBER"]);
+  const idxDepts = findHeaderIndex_v1(headerRow, ["DEPARTAMENTOS", "DEPARTAMENTO", "DEPTS"]);
+
+  if (idxDepts < 0) return [];
+
+  if (idxTelefone < 0 && idxNumberWp < 0) {
+    throw new Error(`[BP_LOOKUP] Cabeçalho sem telefone na sheet=${sheetNameManager}`);
+  }
+
+  const chatNum = chatIdToNumber_v1(chatId);
+
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const telA = idxTelefone >= 0 ? onlyDigits_v1(row[idxTelefone]) : "";
+    const telB = idxNumberWp >= 0 ? onlyDigits_v1(row[idxNumberWp]) : "";
+
+    if (!telA && !telB) continue;
+
+    if (telA === chatNum || telB === chatNum) {
+      return parseDeptListCell_v1(row[idxDepts]);
+    }
+  }
+
+  return [];
+}
+
+function mergeDepartmentRoles_v1(deptsDetalhado, managerDeptKeys) {
+  const managerSet = new Set((managerDeptKeys || []).map((d) => normalizeDeptKey_v1(d)));
+  const merged = [];
+  const seen = new Set();
+
+  for (const item of deptsDetalhado || []) {
+    const nomeOriginal = String(item?.nome || "").trim();
+    if (!nomeOriginal) continue;
+
+    const deptKey = normalizeDeptKey_v1(nomeOriginal);
+    const isManagerDept = managerSet.has(deptKey);
+    const nivel = isManagerDept ? "MANAGER" : String(item?.nivel || "MEMBRO").trim().toUpperCase();
+
+    merged.push({
+      nome: nomeOriginal,
+      nivel,
+      isManager: isManagerDept,
+    });
+
+    seen.add(deptKey);
+  }
+
+  for (const deptKey of managerSet) {
+    if (seen.has(deptKey)) continue;
+
+    merged.push({
+      nome: deptKey,
+      nivel: "MANAGER",
+      isManager: true,
+    });
+  }
+
+  return merged;
+}
+
+//###################################################################################
 // Public: getAccessByChatId
 //###################################################################################
 async function getAccessByChatId({
@@ -168,7 +254,8 @@ async function getAccessByChatId({
   cacheSeconds,
   debugRowLog,
 }) {
-  const key = `bpacc:v9:${spreadsheetId}:${sheetNameBp}:${chatId}`;
+  const sheetNameManager = process.env.SHEET_NAME_ID_MANAGER || "ID_MANAGER";
+  const key = `bpacc:v10:${spreadsheetId}:${sheetNameBp}:${sheetNameManager}:${chatId}`;
 
   if (debugRowLog !== true) {
     const cached = cacheGet(key);
@@ -182,7 +269,16 @@ async function getAccessByChatId({
   const range = `'${sheetNameBp}'!A:ZZ`;
   const rows = await readRange_v1(spreadsheetId, range);
 
-  const empty = { fullName: "", isColab: false, deptsAccess: false, depts: [], deptsDetalhado: [] };
+  const empty = {
+    fullName: "",
+    isColab: false,
+    deptsAccess: false,
+    depts: [],
+    deptsDetalhado: [],
+    managerDepts: [],
+    isManager: false,
+  };
+
   if (!rows || rows.length < 2) {
     cacheSet(key, empty, cacheSeconds);
     return empty;
@@ -202,7 +298,6 @@ async function getAccessByChatId({
     throw new Error(`[BP_LOOKUP] Cabeçalho sem telefone na sheet=${sheetNameBp}`);
   }
 
-  // Mapear colunas de departamentos (D.*)
   const deptCols = [];
   for (let i = 0; i < headerRow.length; i++) {
     const h = normalizeHeaderName_v1(headerRow[i]);
@@ -214,7 +309,6 @@ async function getAccessByChatId({
   const chatNum = chatIdToNumber_v1(chatId);
 
   let result = empty;
-  let foundRowIndex = -1;
 
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r] || [];
@@ -235,31 +329,43 @@ async function getAccessByChatId({
         ? parseDeptsSmart(deptsFlagRaw)
         : { deptsAccess: false, depts: [] };
 
-      // >>> LÓGICA DE DEPARTAMENTOS INTELIGENTE <<<
       const depts = [];
-      const deptsDetalhado = [];
+      const deptsDetalhadoBase = [];
 
       for (const c of deptCols) {
         const valRaw = row[c.idx] || "";
         const v = stripBom(valRaw).trim();
-        
+
         if (v) {
           const lowerV = v.toLowerCase();
-          // Ignora se for "não", "false", "-", etc.
           if (["nao", "não", "false", "0", "n", "falso", "-"].includes(lowerV)) continue;
 
-          // Define o nível: se a pessoa escreveu "sim" ou "x", assume "MEMBRO". Senão, assume o que ela escreveu (ex: "GESTOR")
           let nivel = "MEMBRO";
           if (!["sim", "true", "1", "y", "s", "x", "ok", "verdadeiro", "v"].includes(lowerV)) {
             nivel = v.toUpperCase();
           }
 
           if (c.name) {
-            depts.push(c.name); // Lista simples antiga para retrocompatibilidade
-            deptsDetalhado.push({ nome: c.name, nivel: nivel }); // Objeto novo com permissões
+            depts.push(c.name);
+            deptsDetalhadoBase.push({
+              nome: c.name,
+              nivel,
+              isManager: false,
+            });
           }
         }
       }
+
+      const managerDepts = await getManagerDeptsByChatId_v1({
+        spreadsheetId,
+        sheetNameManager,
+        chatId,
+      });
+
+      const deptsDetalhado = mergeDepartmentRoles_v1(deptsDetalhadoBase, managerDepts);
+      const isManager = Array.isArray(managerDepts) && managerDepts.length > 0;
+
+      const allDeptNames = deptsDetalhado.map((d) => d.nome);
 
       const isColab =
         colabFlag ||
@@ -268,21 +374,33 @@ async function getAccessByChatId({
         type.startsWith("COLAB") ||
         access.startsWith("COLAB") ||
         deptsAccess === true ||
-        depts.length > 0;
+        allDeptNames.length > 0 ||
+        isManager;
 
-      result = { fullName, isColab, deptsAccess, depts, deptsDetalhado };
-      foundRowIndex = r + 1;
+      result = {
+        fullName,
+        isColab,
+        deptsAccess,
+        depts: allDeptNames,
+        deptsDetalhado,
+        managerDepts,
+        isManager,
+      };
 
-      // >>> LOGGER SOLICITADO (Mostra os departamentos e funções) <<<
       if (isColab) {
-          const deptsLog = deptsDetalhado.length > 0 
-              ? deptsDetalhado.map(d => `${d.nome} [${d.nivel}]`).join(", ") 
-              : "Sem departamentos atribuídos";
-              
-          console.log(`\n---------------------------------------------------------`);
-          console.log(`[BP_LOOKUP] 🟢 COLAB IDENTIFICADO: ${fullName}`);
-          console.log(`[BP_LOOKUP] 🏢 PERTENCE A: ${deptsLog}`);
-          console.log(`---------------------------------------------------------\n`);
+        const deptsLog = deptsDetalhado.length > 0
+          ? deptsDetalhado.map((d) => `${d.nome} [${d.nivel}]`).join(", ")
+          : "Sem departamentos atribuídos";
+
+        const managersLog = managerDepts.length > 0
+          ? managerDepts.join(", ")
+          : "Nenhum";
+
+        console.log(`\n---------------------------------------------------------`);
+        console.log(`[BP_LOOKUP] 🟢 COLAB IDENTIFICADO: ${fullName}`);
+        console.log(`[BP_LOOKUP] 🏢 PERTENCE A: ${deptsLog}`);
+        console.log(`[BP_LOOKUP] 👔 MANAGER DE: ${managersLog}`);
+        console.log(`---------------------------------------------------------\n`);
       }
       break;
     }
@@ -296,39 +414,39 @@ async function getAccessByChatId({
 // Desativação de Mensagens (Opt-out)
 //###################################################################################
 async function desativarMensagensWS(spreadsheetId, sheetNameBp, telefone) {
-    try {
-        const { readSheet, writeCells } = require("./sheets");
-        const data = await readSheet(spreadsheetId, sheetNameBp);
-        if (!data || data.length < 2) return false;
+  try {
+    const { readSheet, writeCells } = require("./sheets");
+    const data = await readSheet(spreadsheetId, sheetNameBp);
+    if (!data || data.length < 2) return false;
 
-        const headers = data[0].map(h => stripBom(h).trim().toUpperCase());
-        const idxTel = headers.indexOf("TELEFONE");
-        const idxNumberWp = headers.indexOf("NUMBER_WHATSAPP");
-        const idxMsgWs = headers.indexOf("MENSAGEM WS");
+    const headers = data[0].map(h => stripBom(h).trim().toUpperCase());
+    const idxTel = headers.indexOf("TELEFONE");
+    const idxNumberWp = headers.indexOf("NUMBER_WHATSAPP");
+    const idxMsgWs = headers.indexOf("MENSAGEM WS");
 
-        if (idxMsgWs === -1) {
-            console.error(`[BP_LOOKUP] Coluna [MENSAGEM WS] não encontrada na aba ${sheetNameBp}`);
-            return false;
-        }
-
-        const telBusca = onlyDigits_v1(telefone);
-
-        for (let i = 1; i < data.length; i++) {
-            const telA = onlyDigits_v1(data[i][idxTel] || "");
-            const telB = onlyDigits_v1(data[i][idxNumberWp] || "");
-
-            if (telA === telBusca || telB === telBusca) {
-                const range = `${sheetNameBp}!${colToA1(idxMsgWs)}${i + 1}`;
-                await writeCells(spreadsheetId, range, [["FALSE"]]);
-                console.log(`[BP_LOOKUP] ✅ Contacto ${telefone} removido da lista (Linha ${i + 1})`);
-                return true;
-            }
-        }
-        return false;
-    } catch (error) {
-        console.error("[BP_LOOKUP] Erro ao desativar mensagens:", error.message);
-        return false;
+    if (idxMsgWs === -1) {
+      console.error(`[BP_LOOKUP] Coluna [MENSAGEM WS] não encontrada na aba ${sheetNameBp}`);
+      return false;
     }
+
+    const telBusca = onlyDigits_v1(telefone);
+
+    for (let i = 1; i < data.length; i++) {
+      const telA = onlyDigits_v1(data[i][idxTel] || "");
+      const telB = onlyDigits_v1(data[i][idxNumberWp] || "");
+
+      if (telA === telBusca || telB === telBusca) {
+        const range = `${sheetNameBp}!${colToA1(idxMsgWs)}${i + 1}`;
+        await writeCells(spreadsheetId, range, [["FALSE"]]);
+        console.log(`[BP_LOOKUP] ✅ Contacto ${telefone} removido da lista (Linha ${i + 1})`);
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    console.error("[BP_LOOKUP] Erro ao desativar mensagens:", error.message);
+    return false;
+  }
 }
 
 //###################################################################################
@@ -348,6 +466,6 @@ async function getFirstNameByChatId({ spreadsheetId, sheetNameBp, chatId, cacheS
 module.exports = {
   getAccessByChatId,
   getFullNameByChatId,
-  getFirstNameByChatId, 
+  getFirstNameByChatId,
   desativarMensagensWS
 };

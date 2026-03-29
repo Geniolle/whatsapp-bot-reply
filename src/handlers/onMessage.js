@@ -11,6 +11,7 @@ const { isSpamming, getDayGreetingPt } = require("./onMessageUtils");
 const { getHistory, saveToHistory } = require("../services/memoryManager");
 const { executeProcess } = require("./processDispatcher");
 const { checkDepartmentAccess } = require("../utils/permissions");
+const { handlePendingEscalaFlow_v1 } = require("../services/managerScaleFlow");
 
 //###################################################################################
 // Helpers
@@ -163,6 +164,59 @@ function logRuleSelection(bodyRaw, procIA, aiData, matchedRule, isBlocked, block
     console.log(`---------------------------------------------------------\n`);
 }
 
+async function sendAndAuditReply({
+    client,
+    message,
+    senderId,
+    dbId,
+    firstName,
+    bodyRaw,
+    rawText,
+    origem,
+    aiData,
+    matchedRule,
+    isColab,
+    deptsAtribuidos,
+    isManager,
+    managerDepts,
+    startTime,
+    processLabel,
+}) {
+    const finalReply = buildFinalReply(rawText, firstName, origem, aiData || {});
+
+    const chat = await message.getChat();
+    await chat.sendStateTyping();
+
+    const delayMs = finalReply.length > 60
+        ? Math.floor(Math.random() * 5000) + 15000
+        : 6000;
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await client.sendMessage(senderId, finalReply);
+
+    saveToHistory(dbId, "user", bodyRaw);
+    saveToHistory(dbId, "assistant", finalReply);
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    const logIdTable = getRuleIdText(matchedRule, aiData);
+    const logContexto = getRuleContextText(matchedRule);
+
+    logAudit({
+        type: "AUDITORIA",
+        chatId: firstName,
+        isColab,
+        depts: deptsAtribuidos,
+        isManager,
+        managerDepts,
+        msg: bodyRaw,
+        response: finalReply,
+        idTable: logIdTable,
+        context: logContexto,
+        origem,
+        process: `${processLabel || "IA"} (${duration}s)`,
+    });
+}
+
 //###################################################################################
 // Main
 //###################################################################################
@@ -190,6 +244,8 @@ function registerOnMessage_v5(client, cfg) {
             const fullName = accData?.fullName || "";
             const firstName = getFirstName(fullName);
             const deptsAtribuidos = accData?.deptsDetalhado || [];
+            const isManager = !!accData?.isManager;
+            const managerDepts = accData?.managerDepts || [];
 
             logAudit({
                 type: "TRACE_RX",
@@ -197,9 +253,52 @@ function registerOnMessage_v5(client, cfg) {
                 msg: bodyRaw,
                 isColab,
                 depts: deptsAtribuidos,
+                isManager,
+                managerDepts,
             });
 
             const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, 0);
+
+            //#########################################################################
+            // 1. Interceta fluxos pendentes de escala manager
+            //#########################################################################
+            const pendingFlow = await handlePendingEscalaFlow_v1({
+                chatId: dbId,
+                bodyRaw,
+                accData,
+                cfg,
+            });
+
+            if (pendingFlow?.handled) {
+                let matchedRule = null;
+
+                if (pendingFlow.matchedRuleOverride) {
+                    matchedRule = allRules.find(
+                        (r) => String(r.PROCESSO || "").trim().toUpperCase() === String(pendingFlow.matchedRuleOverride).trim().toUpperCase()
+                    ) || null;
+                }
+
+                await sendAndAuditReply({
+                    client,
+                    message,
+                    senderId,
+                    dbId,
+                    firstName,
+                    bodyRaw,
+                    rawText: pendingFlow.rawText || "Não consegui concluir a operação.",
+                    origem: pendingFlow.origem || "FLOW_ESCALA_MANAGER",
+                    aiData: { processo: pendingFlow.processTag || "__ESCALAS__", contexto: "FLOW" },
+                    matchedRule,
+                    isColab,
+                    deptsAtribuidos,
+                    isManager,
+                    managerDepts,
+                    startTime,
+                    processLabel: pendingFlow.processTag || "__ESCALAS__",
+                });
+                return;
+            }
+
             const history = getHistory(dbId);
 
             const intent = await handleIntent(client, senderId, dbId, bodyRaw, cfg, {
@@ -266,7 +365,7 @@ function registerOnMessage_v5(client, cfg) {
                 }
 
                 if (procIA && procIA !== "FAQ" && procIA !== "NENHUM") {
-                    const procResult = await executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName);
+                    const procResult = await executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName, accData);
 
                     if (procResult?.rawText) {
                         rawText = (rawText && rawText !== "OK")
@@ -293,37 +392,23 @@ function registerOnMessage_v5(client, cfg) {
             //###################################################################################
             // Envio
             //###################################################################################
-            const finalReply = buildFinalReply(rawText, firstName, origem, aiData);
-
-            const chat = await message.getChat();
-            await chat.sendStateTyping();
-
-            const delayMs = finalReply.length > 60
-                ? Math.floor(Math.random() * 5000) + 15000
-                : 6000;
-
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
-            await client.sendMessage(senderId, finalReply);
-
-            saveToHistory(dbId, "user", bodyRaw);
-            saveToHistory(dbId, "assistant", finalReply);
-
-            const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-
-            const logIdTable = getRuleIdText(matchedRule, aiData);
-            const logContexto = getRuleContextText(matchedRule);
-
-            logAudit({
-                type: "AUDITORIA",
-                chatId: firstName,
-                isColab,
-                depts: deptsAtribuidos,
-                msg: bodyRaw,
-                response: finalReply,
-                idTable: logIdTable,
-                context: logContexto,
+            await sendAndAuditReply({
+                client,
+                message,
+                senderId,
+                dbId,
+                firstName,
+                bodyRaw,
+                rawText,
                 origem,
-                process: `${procIA || "IA"} (${duration}s)`,
+                aiData,
+                matchedRule,
+                isColab,
+                deptsAtribuidos,
+                isManager,
+                managerDepts,
+                startTime,
+                processLabel: procIA || "IA",
             });
         } catch (e) {
             logAudit({

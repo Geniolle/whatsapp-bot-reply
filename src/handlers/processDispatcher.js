@@ -8,14 +8,17 @@ const { logAudit } = require("../services/auditLogger");
 /**
  * Roteia a intenção detetada para o serviço correspondente (Livraria, Ausências, Ensaios, etc.)
  */
-async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
+async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName, accData) {
     let rawText = "";
     let origem = "AI_GENERICA";
 
     // 1. PESQUISA GERAL DE LIVRARIA
     if (
-        aiData?.processo === "LIVRARIA" || 
-        (aiData?.processo?.includes("LIVRARIA") && !aiData?.processo?.includes("AUTORES") && !aiData?.processo?.includes("EDITORAS") && !aiData?.processo?.includes("PESQUISA_"))
+        aiData?.processo === "LIVRARIA" ||
+        (aiData?.processo?.includes("LIVRARIA") &&
+            !aiData?.processo?.includes("AUTORES") &&
+            !aiData?.processo?.includes("EDITORAS") &&
+            !aiData?.processo?.includes("PESQUISA_"))
     ) {
         try {
             const libService = require("../services/appLivraria");
@@ -35,7 +38,8 @@ async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
         } catch (e) {
             logAudit({ type: "ERRO", error: `Proc Livraria: ${e.message}`, isColab });
         }
-    } 
+    }
+
     // 2. LISTAGEM DE AUTORES OU EDITORAS
     else if (aiData?.processo === "__APP_LIVRARIA_AUTORES__" || aiData?.processo === "__APP_LIVRARIA_EDITORAS__") {
         try {
@@ -57,6 +61,7 @@ async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
             logAudit({ type: "ERRO", error: `Proc Livraria Listas: ${e.message}`, isColab });
         }
     }
+
     // 3. PESQUISA EXCLUSIVA POR AUTOR OU EDITORA
     else if (aiData?.processo === "__APP_LIVRARIA_PESQUISA_AUTOR__" || aiData?.processo === "__APP_LIVRARIA_PESQUISA_EDITORA__") {
         try {
@@ -80,13 +85,14 @@ async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
             logAudit({ type: "ERRO", error: `Proc Livraria Exclusiva: ${e.message}`, isColab });
         }
     }
+
     // 4. AUSÊNCIAS / FÉRIAS
     else if (aiData?.processo === "__AUSENCIAS__") {
         try {
             const ausenciasService = require("../services/appAusencias");
-            rawText = await ausenciasService.getMinhasAusencias_v1({ 
-                chatId: dbId, 
-                fullName: fullName 
+            rawText = await ausenciasService.getMinhasAusencias_v1({
+                chatId: dbId,
+                fullName: fullName
             });
             origem = "DB_AUSENCIAS";
         } catch (e) {
@@ -94,17 +100,18 @@ async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
             rawText = "Desculpa, ocorreu um erro ao consultar as tuas ausências na base de dados.";
         }
     }
-    // 5. ENSAIO (NOVO/MIGRADO)
+
+    // 5. ENSAIO
     else if (aiData?.processo === "__APP_ENSAIO__") {
         try {
             const mod = require("../services/appEnsaio");
             const sheetNameEnsaio = String(cfg?.sheetNameEnsaio || process.env.SHEET_NAME_ENSAIO || "").trim();
-            
+
             if (!sheetNameEnsaio) throw new Error("Aba de Ensaios não configurada.");
 
-            const out = await mod.getLatestEnsaio_v1({ 
-                spreadsheetId: cfg.spreadsheetId, 
-                sheetNameEnsaio 
+            const out = await mod.getLatestEnsaio_v1({
+                spreadsheetId: cfg.spreadsheetId,
+                sheetNameEnsaio
             });
 
             if (typeof out === "string" && out.trim()) {
@@ -113,11 +120,11 @@ async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
                 const data = String(out?.ENSAIO || out?.data || out?.DATA || "").trim();
                 const horarioRaw = String(out?.HORARIO || out?.horario || out?.HORA || out?.["HORÁRIO"] || "").trim();
                 const responsavel = String(out?.["RESPONSÁVEL"] || out?.RESPONSAVEL || out?.responsavel || "").trim();
-                
+
                 let horario = horarioRaw;
                 const m = horarioRaw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
                 if (m) horario = `${m[1].padStart(2, "0")}:${m[2]}`;
-                
+
                 if (data || horario || responsavel) {
                     rawText = `A data do último ensaio no sistema é no dia ${data || "—"} às ${horario || "—"} horas e o responsável é o vocal líder ${responsavel || "—"}.`;
                 } else {
@@ -130,19 +137,20 @@ async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
             rawText = "Não consegui consultar o ensaio neste momento.";
         }
     }
-    // 6. AGENDA (NOVO/MIGRADO)
+
+    // 6. AGENDA
     else if (aiData?.processo === "__APP_AGENDA_FULL__") {
         try {
             const mod = require("../services/appAgenda");
             const sheetNameAgenda = String(cfg?.sheetNameAgenda || process.env.SHEET_NAME_AGENDA || "").trim();
-            
+
             if (!sheetNameAgenda) throw new Error("Aba de Agenda não configurada.");
 
-            const payload = await mod.getAgendaDepartamentos_v1({ 
-                spreadsheetId: cfg.spreadsheetId, 
-                sheetNameAgenda, 
-                cacheSeconds: cfg.cacheAgendaSeconds, 
-                timeZone: "Europe/Lisbon" 
+            const payload = await mod.getAgendaDepartamentos_v1({
+                spreadsheetId: cfg.spreadsheetId,
+                sheetNameAgenda,
+                cacheSeconds: cfg.cacheAgendaSeconds,
+                timeZone: "Europe/Lisbon"
             });
             rawText = mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
             origem = "DB_AGENDA";
@@ -151,7 +159,48 @@ async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName) {
             rawText = "Não consegui consultar a agenda dos departamentos neste momento.";
         }
     }
-    
+
+    // 7. ESCALAS
+    else if (aiData?.processo === "__ESCALAS__" || aiData?.processo === "__ESCALA__") {
+        try {
+            const escalaService = require("../services/appEscala");
+            const managerScaleFlow = require("../services/managerScaleFlow");
+
+            if (accData?.isManager === true) {
+                const flowStart = await managerScaleFlow.startEscalaFlow_v1({
+                    chatId: dbId,
+                    accData,
+                    cfg,
+                    bodyRaw,
+                });
+
+                if (flowStart?.handled) {
+                    rawText = flowStart.rawText || "";
+                    origem = flowStart.origem || "FLOW_ESCALA_MANAGER_SCOPE";
+                    return { rawText, origem };
+                }
+            }
+
+            const sheetNameBpService = String(cfg?.sheetNameBp || process.env.SHEET_NAME_BP || process.env.SHEET_NAME_BP_SERVICE || "").trim();
+            const sheetNameEscala = String(process.env.SHEET_NAME_ESCALA || "BP ESCALA").trim();
+
+            if (!sheetNameBpService) throw new Error("Aba BP SERVICE não configurada.");
+            if (!sheetNameEscala) throw new Error("Aba BP ESCALA não configurada.");
+
+            rawText = await escalaService.getMinhasEscalas_v1({
+                spreadsheetId: cfg.spreadsheetId,
+                sheetNameBpService,
+                sheetNameEscala,
+                chatId: dbId
+            });
+
+            origem = "DB_ESCALAS";
+        } catch (e) {
+            logAudit({ type: "ERRO", error: `Proc Escalas: ${e.message}`, isColab });
+            rawText = "Não consegui consultar a tua escala neste momento.";
+        }
+    }
+
     return { rawText, origem };
 }
 

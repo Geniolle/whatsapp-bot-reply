@@ -1,30 +1,51 @@
 //###################################################################################
-// src/services/memoryManager.js - GESTÃO DE CONTEXTO (MEMÓRIA CURTO PRAZO)
+// src/services/memoryManager.js - GESTÃO DE CONTEXTO + ESTADO DE FLUXOS
 //###################################################################################
 "use strict";
 
 const userMemory = new Map();
-const MAX_HISTORY = 6; // Guarda as últimas 3 trocas (pergunta/resposta)
+const userDialogState = new Map();
+const MAX_HISTORY = 6;
 
-/**
- * Obtém o histórico formatado para a OpenAI
- */
+//###################################################################################
+// Histórico curto
+//###################################################################################
 function getHistory(chatId) {
     return userMemory.get(chatId) || [];
 }
 
-/**
- * Salva uma nova interação no histórico
- */
 function saveToHistory(chatId, role, content) {
     let history = userMemory.get(chatId) || [];
     history.push({ role, content });
 
-    // Mantém apenas o limite definido para não gastar tokens desnecessários
     if (history.length > MAX_HISTORY) {
         history.shift();
     }
     userMemory.set(chatId, history);
 }
 
-module.exports = { getHistory, saveToHistory };
+//###################################################################################
+// Estado de fluxos conversacionais
+//###################################################################################
+function getDialogState(chatId) {
+    return userDialogState.get(chatId) || null;
+}
+
+function setDialogState(chatId, state) {
+    userDialogState.set(chatId, {
+        ...(state || {}),
+        updatedAt: Date.now(),
+    });
+}
+
+function clearDialogState(chatId) {
+    userDialogState.delete(chatId);
+}
+
+module.exports = {
+    getHistory,
+    saveToHistory,
+    getDialogState,
+    setDialogState,
+    clearDialogState,
+};

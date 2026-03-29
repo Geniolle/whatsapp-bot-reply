@@ -11,7 +11,6 @@ async function handleIntent(client, senderId, dbId, bodyRaw, cfg, userContext) {
     const textNorm = normalizeText(bodyRaw);
 
     // 1. PRIORIDADE MÁXIMA: Fluxo de Agendamento
-    // Usamos Expressões Regulares (Regex) para detetar qualquer variação (confirma, confirmo, confirmar 34, etc.)
     const isSchedulingKeywords = /^(confirmar|confirma|confirmo|aceitar|aceito|recusar|recuso|sim|nao|ok)(\s+\d+)?$/i.test(textNorm);
     const isNumericId = /^\d+$/.test(textNorm);
 
@@ -20,18 +19,22 @@ async function handleIntent(client, senderId, dbId, bodyRaw, cfg, userContext) {
         if (handled) return { type: "SCHEDULING" };
     }
 
+    if (typeof analisarComIA !== "function") {
+        throw new Error("analisarComIA is not a function");
+    }
+
     // 2. PRIORIDADE: Inteligência Artificial com Contexto
     const aiResult = await analisarComIA(
-        bodyRaw, 
-        userContext.firstName, 
-        userContext.history || [], 
-        userContext.allRules, 
+        bodyRaw,
+        userContext.firstName,
+        userContext.history || [],
+        userContext.allRules || [],
         userContext.agendaIA || ""
     );
-    
-    return { 
-        type: "AI", 
-        result: aiResult 
+
+    return {
+        type: "AI",
+        result: aiResult
     };
 }
 
