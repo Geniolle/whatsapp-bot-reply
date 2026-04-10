@@ -38,6 +38,9 @@ npm install
 pm2 stop all
 pm2 restart all
 
+🚀 Reinicie o servidor
+sudo reboot - Reiniciar 
+
 🚀 Passo 5: Para limpar os logs
 pm2 flush
 
