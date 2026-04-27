@@ -3,9 +3,11 @@
 //###################################################################################
 "use strict";
 
+const audit = require("../services/audit");
+const lockManager = require("../services/lockManager");
+const humanizer = require("../utils/humanizer");
 const { getRules, buildHumanizedResponse } = require("../services/responsesStore");
 const { getAccessByChatId } = require("../services/bpLookup");
-const { logAudit } = require("../services/auditLogger");
 const { handleIntent } = require("./intentManager");
 const { isSpamming, getDayGreetingPt } = require("./onMessageUtils");
 const { getHistory, saveToHistory } = require("../services/memoryManager");
@@ -14,8 +16,9 @@ const { checkDepartmentAccess } = require("../utils/permissions");
 const { handlePendingEscalaFlow_v1 } = require("../services/managerScaleFlow");
 
 //###################################################################################
-// Helpers
+// Helpers de Formatação e Lógica de Negócio
 //###################################################################################
+
 function getFirstName(fullName) {
     return String(fullName || "").trim().split(/\s+/g)[0] || "Visitante";
 }
@@ -80,11 +83,7 @@ function getCandidateRulesById(allRules, aiData) {
 
 function resolveRuleByDepartment(candidateRules, deptsAtribuidos) {
     if (!candidateRules || candidateRules.length === 0) {
-        return {
-            matchedRule: null,
-            isBlocked: false,
-            blockingDept: "",
-        };
+        return { matchedRule: null, isBlocked: false, blockingDept: "" };
     }
 
     const restrictedAllowed = [];
@@ -108,61 +107,19 @@ function resolveRuleByDepartment(candidateRules, deptsAtribuidos) {
         }
     }
 
-    if (restrictedAllowed.length > 0) {
-        return {
-            matchedRule: restrictedAllowed[0],
-            isBlocked: false,
-            blockingDept: "",
-        };
-    }
-
-    if (unrestricted.length > 0) {
-        return {
-            matchedRule: unrestricted[0],
-            isBlocked: false,
-            blockingDept: "",
-        };
-    }
-
+    if (restrictedAllowed.length > 0) return { matchedRule: restrictedAllowed[0], isBlocked: false, blockingDept: "" };
+    if (unrestricted.length > 0) return { matchedRule: unrestricted[0], isBlocked: false, blockingDept: "" };
+    
     if (restrictedBlocked.length > 0) {
-        return {
-            matchedRule: restrictedBlocked[0].rule,
-            isBlocked: true,
-            blockingDept: restrictedBlocked[0].missingDept,
-        };
+        return { matchedRule: restrictedBlocked[0].rule, isBlocked: true, blockingDept: restrictedBlocked[0].missingDept };
     }
 
-    return {
-        matchedRule: candidateRules[0],
-        isBlocked: false,
-        blockingDept: "",
-    };
+    return { matchedRule: candidateRules[0], isBlocked: false, blockingDept: "" };
 }
 
-function logRuleSelection(bodyRaw, procIA, aiData, matchedRule, isBlocked, blockingDept) {
-    const logIdTableSelecao = getRuleIdText(matchedRule, aiData);
-    const logContextoSelecao = getRuleContextText(matchedRule);
-
-    console.log(`\n---------------------------------------------------------`);
-    console.log(`[RAIO-X] REGRA SELECIONADA`);
-    console.log(` > PERGUNTA:  "${bodyRaw}"`);
-    console.log(` > PROCESSO:  ${procIA || "NENHUM"}`);
-    console.log(` > ORIGEM_IA: ${aiData?.contexto || "N/A"}`);
-    console.log(` > ID:        ${logIdTableSelecao}`);
-    console.log(` > CTX:       ${logContextoSelecao}`);
-    console.log(
-        ` > REGRA:     ${
-            matchedRule
-                ? (matchedRule.CHAVE || matchedRule.PROCESSO || matchedRule.ID_TABLE || "N/A")
-                : "NENHUMA"
-        }`
-    );
-    console.log(` > BLOQUEIO:  ${isBlocked ? "SIM" : "NÃO"}`);
-    if (isBlocked && blockingDept) {
-        console.log(` > RESTRIÇÃO: ${blockingDept}`);
-    }
-    console.log(`---------------------------------------------------------\n`);
-}
+//###################################################################################
+// Core Send & Audit (Humanização e Registo)
+//###################################################################################
 
 async function sendAndAuditReply({
     client,
@@ -183,43 +140,35 @@ async function sendAndAuditReply({
     processLabel,
 }) {
     const finalReply = buildFinalReply(rawText, firstName, origem, aiData || {});
-
     const chat = await message.getChat();
+
+    // HUMANIZAÇÃO: Simular estado de digitação proporcional
     await chat.sendStateTyping();
+    const typingTime = Math.min(Math.max(finalReply.length * 45, 2000), 7000);
+    await new Promise((resolve) => setTimeout(resolve, typingTime));
 
-    const delayMs = finalReply.length > 60
-        ? Math.floor(Math.random() * 5000) + 15000
-        : 6000;
-
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
     await client.sendMessage(senderId, finalReply);
 
+    // Persistência em memória
     saveToHistory(dbId, "user", bodyRaw);
     saveToHistory(dbId, "assistant", finalReply);
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    const logIdTable = getRuleIdText(matchedRule, aiData);
-    const logContexto = getRuleContextText(matchedRule);
-
-    logAudit({
-        type: "AUDITORIA",
-        chatId: firstName,
-        isColab,
-        depts: deptsAtribuidos,
-        isManager,
-        managerDepts,
-        msg: bodyRaw,
-        response: finalReply,
-        idTable: logIdTable,
-        context: logContexto,
+    
+    // AUDITORIA PROFISSIONAL
+    audit.info("REPLY", `Resposta enviada para ${firstName}`, {
+        chatId: dbId,
         origem,
-        process: `${processLabel || "IA"} (${duration}s)`,
+        duration: `${duration}s`,
+        process: processLabel,
+        idTable: getRuleIdText(matchedRule, aiData)
     });
 }
 
 //###################################################################################
-// Main
+// Main Handler
 //###################################################################################
+
 function registerOnMessage_v5(client, cfg) {
     client.on("message", async (message) => {
         const startTime = Date.now();
@@ -232,12 +181,21 @@ function registerOnMessage_v5(client, cfg) {
 
         if (!bodyRaw || isSpamming(dbId)) return;
 
+        // LOCK SYSTEM: Evita execuções duplicadas para o mesmo utilizador
+        const userLockKey = `msg_${dbId}`;
+        if (!lockManager.acquire(userLockKey)) return;
+
         try {
+            // HUMANIZAÇÃO: Confirmação visual de leitura
+            const chat = await message.getChat();
+            await chat.sendSeen();
+
+            // Obter permissões e dados do utilizador
             const accData = await getAccessByChatId({
                 spreadsheetId: cfg.spreadsheetId,
                 sheetNameBp: cfg.sheetNameBp,
                 chatId: dbId,
-                cacheSeconds: 0,
+                cacheSeconds: 300, // Melhor prática: Cache ativado para evitar carga na Google API
             });
 
             const isColab = !!accData?.isColab;
@@ -247,21 +205,11 @@ function registerOnMessage_v5(client, cfg) {
             const isManager = !!accData?.isManager;
             const managerDepts = accData?.managerDepts || [];
 
-            logAudit({
-                type: "TRACE_RX",
-                chatId: dbId,
-                msg: bodyRaw,
-                isColab,
-                depts: deptsAtribuidos,
-                isManager,
-                managerDepts,
-            });
+            audit.info("TRACE", `Processando: "${bodyRaw.substring(0, 20)}..." de ${firstName}`, { dbId });
 
-            const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, 0);
+            const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, 300);
 
-            //#########################################################################
-            // 1. Interceta fluxos pendentes de escala manager
-            //#########################################################################
+            // 1. Intercetar fluxos pendentes (Prioridade de Estado)
             const pendingFlow = await handlePendingEscalaFlow_v1({
                 chatId: dbId,
                 bodyRaw,
@@ -270,43 +218,29 @@ function registerOnMessage_v5(client, cfg) {
             });
 
             if (pendingFlow?.handled) {
-                let matchedRule = null;
-
+                let matchedRuleOverride = null;
                 if (pendingFlow.matchedRuleOverride) {
-                    matchedRule = allRules.find(
-                        (r) => String(r.PROCESSO || "").trim().toUpperCase() === String(pendingFlow.matchedRuleOverride).trim().toUpperCase()
+                    matchedRuleOverride = allRules.find(r => 
+                        String(r.PROCESSO || "").toUpperCase() === String(pendingFlow.matchedRuleOverride).toUpperCase()
                     ) || null;
                 }
 
                 await sendAndAuditReply({
-                    client,
-                    message,
-                    senderId,
-                    dbId,
-                    firstName,
-                    bodyRaw,
+                    client, message, senderId, dbId, firstName, bodyRaw,
                     rawText: pendingFlow.rawText || "Não consegui concluir a operação.",
-                    origem: pendingFlow.origem || "FLOW_ESCALA_MANAGER",
-                    aiData: { processo: pendingFlow.processTag || "__ESCALAS__", contexto: "FLOW" },
-                    matchedRule,
-                    isColab,
-                    deptsAtribuidos,
-                    isManager,
-                    managerDepts,
-                    startTime,
-                    processLabel: pendingFlow.processTag || "__ESCALAS__",
+                    origem: pendingFlow.origem || "FLOW_PENDING",
+                    aiData: { processo: pendingFlow.processTag || "FLOW", contexto: "FLOW" },
+                    matchedRule: matchedRuleOverride,
+                    isColab, deptsAtribuidos, isManager, managerDepts, startTime,
+                    processLabel: pendingFlow.processTag || "FLOW"
                 });
                 return;
             }
 
+            // 2. Inteligência Artificial / Intenção
             const history = getHistory(dbId);
-
             const intent = await handleIntent(client, senderId, dbId, bodyRaw, cfg, {
-                firstName,
-                allRules,
-                isColab,
-                history,
-                agendaIA: "",
+                firstName, allRules, isColab, history
             });
 
             if (!intent || intent.type !== "AI") return;
@@ -320,14 +254,10 @@ function registerOnMessage_v5(client, cfg) {
             let blockingDept = "";
             let matchedRule = null;
 
-            //###################################################################################
-            // Seleção da regra
-            // PRIORIDADE MÁXIMA: PROCESSO
-            //###################################################################################
+            // 3. Seleção de Regra e Permissões
             if (procIA && procIA !== "FAQ" && procIA !== "NENHUM") {
                 const processRules = getCandidateRulesByProcess(allRules, procIA);
                 const resolved = resolveRuleByDepartment(processRules, deptsAtribuidos);
-
                 matchedRule = resolved.matchedRule;
                 isBlocked = resolved.isBlocked;
                 blockingDept = resolved.blockingDept || "";
@@ -336,41 +266,26 @@ function registerOnMessage_v5(client, cfg) {
             } else {
                 const idRules = getCandidateRulesById(allRules, aiData);
                 const resolved = resolveRuleByDepartment(idRules, deptsAtribuidos);
-
                 matchedRule = resolved.matchedRule;
                 isBlocked = resolved.isBlocked;
                 blockingDept = resolved.blockingDept || "";
             }
 
-            logRuleSelection(bodyRaw, procIA, aiData, matchedRule, isBlocked, blockingDept);
-
-            //###################################################################################
-            // Bloqueio de acesso
-            //###################################################################################
+            // 4. Tratamento de Bloqueio
             if (isBlocked) {
-                rawText =
-                    `🔒 *Acesso Restrito*\n\n` +
-                    `Desculpa, mas não tens permissão para ver isto. ` +
-                    `Esta informação é exclusiva para o departamento: *${blockingDept}*.`;
+                rawText = `🔒 *Acesso Restrito*\n\nDesculpa ${firstName}, mas esta informação é exclusiva para o departamento: *${blockingDept}*.`;
                 origem = "BLOQUEIO_DEPARTAMENTO";
-            }
-
-            //###################################################################################
-            // Execução do fluxo
-            //###################################################################################
-            if (!isBlocked) {
-                if (aiData?.resposta && aiData.resposta !== "OK" && String(aiData.resposta).trim().length > 2) {
+            } else {
+                // 5. Execução de Processos de Negócio
+                if (aiData?.resposta && aiData.resposta !== "OK" && String(aiData.resposta).length > 2) {
                     rawText = aiData.resposta;
                     origem = "AI_CHAT";
                 }
 
                 if (procIA && procIA !== "FAQ" && procIA !== "NENHUM") {
                     const procResult = await executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName, accData);
-
                     if (procResult?.rawText) {
-                        rawText = (rawText && rawText !== "OK")
-                            ? `${rawText}\n\n${procResult.rawText}`
-                            : procResult.rawText;
+                        rawText = (rawText && rawText !== "OK") ? `${rawText}\n\n${procResult.rawText}` : procResult.rawText;
                         origem = procResult.origem || origem;
                     }
                 }
@@ -381,41 +296,24 @@ function registerOnMessage_v5(client, cfg) {
                 }
             }
 
-            //###################################################################################
-            // Fallback
-            //###################################################################################
+            // Fallback de segurança
             if (!rawText || String(rawText).trim() === "OK") {
-                rawText = "Desculpa, não entendi bem. Podes tentar perguntar de outra forma?";
-                origem = "FALLBACK_SEGURANCA";
+                rawText = "Não consegui encontrar essa informação. Podes reformular a pergunta?";
+                origem = "FALLBACK_SAFETY";
             }
 
-            //###################################################################################
-            // Envio
-            //###################################################################################
+            // 6. Envio Final
             await sendAndAuditReply({
-                client,
-                message,
-                senderId,
-                dbId,
-                firstName,
-                bodyRaw,
-                rawText,
-                origem,
-                aiData,
-                matchedRule,
-                isColab,
-                deptsAtribuidos,
-                isManager,
-                managerDepts,
-                startTime,
-                processLabel: procIA || "IA",
+                client, message, senderId, dbId, firstName, bodyRaw, rawText,
+                origem, aiData, matchedRule, isColab, deptsAtribuidos, 
+                isManager, managerDepts, startTime, processLabel: procIA || "IA"
             });
+
         } catch (e) {
-            logAudit({
-                type: "ERRO_SISTEMA",
-                chatId: dbId,
-                error: e.message,
-            });
+            audit.error("ON_MESSAGE_FATAL", e.message, { dbId, stack: e.stack });
+        } finally {
+            // Libertar Lock independentemente do resultado
+            lockManager.release(userLockKey);
         }
     });
 }

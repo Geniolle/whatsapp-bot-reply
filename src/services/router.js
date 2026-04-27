@@ -1,111 +1,64 @@
 ﻿//###################################################################################
-// src/services/router.js
+// src/services/router.js - GESTOR DE ROTEAMENTO E RESILIÊNCIA
 //###################################################################################
 "use strict";
 
-//###################################################################################
-// Normalização (matching consistente)
-//###################################################################################
-function normalizeText(s) {
-  return String(s || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+const audit = require("./audit");
+const { handleIntent } = require("../handlers/intentManager");
+const { getRules } = require("./responsesStore");
+const { getHistory } = require("./memoryManager");
 
-function stripBom(v) {
-  return String(v || "").replace(/^\uFEFF/, "");
-}
+/**
+ * Processa a mensagem, identifica a intenção via IA e encaminha para o fluxo correto.
+ * Implementa cache de regras e tratamento de exceções para estabilidade do Event Loop.
+ */
+async function processMessage(msg, cfg, client) {
+    const contact = await msg.getContact();
+    const senderId = contact.id._serialized;
+    const dbId = senderId.includes("@lid") ? `${contact.number}@c.us` : senderId;
+    const bodyRaw = String(msg.body || "").trim();
 
-//###################################################################################
-// SPECIAL: FALLBACK / MENU
-//###################################################################################
-function getSpecial(rules, key) {
-  const k = stripBom(key).trim().toUpperCase();
-  const r = (rules || []).find((x) => {
-    const mt = stripBom(x.matchType).trim().toUpperCase();
-    const ch = stripBom(x.chave).trim().toUpperCase();
-    return mt === "SPECIAL" && ch === k;
-  });
-  return r ? String(r.resposta || "").trim() : null;
-}
+    try {
+        audit.info("ROUTER", `Iniciando processamento para ${dbId}`);
 
-//###################################################################################
-// KEYWORDS helpers (separadores: | , ;)
-//###################################################################################
-function escapeRegex(s) {
-  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+        // 1. Obter Regras da Planilha com Cache de 300s (5 minutos)
+        // Reduz drasticamente as chamadas HTTP à Google API
+        const allRules = await getRules(cfg.spreadsheetId, cfg.sheetNameResp, 300);
 
-function splitKeywords(keyRaw) {
-  return stripBom(keyRaw)
-    .split(/[|,;]+/g)
-    .map((k) => normalizeText(k))
-    .filter(Boolean);
-}
+        // 2. Recuperar Histórico para contexto
+        const history = getHistory(dbId);
 
-function hasKeyword(msgN, kwN) {
-  if (!kwN) return false;
-  if (kwN.includes(" ")) return msgN.includes(kwN);
-  const re = new RegExp(`(?:^|\\s)${escapeRegex(kwN)}(?:$|\\s)`, "i");
-  return re.test(msgN);
-}
+        // 3. Detetar Intenção via IA
+        const intent = await handleIntent(client, senderId, dbId, bodyRaw, cfg, {
+            firstName: contact.pushname || "Utilizador",
+            allRules,
+            isColab: false,
+            history
+        });
 
-//###################################################################################
-// Matching: retorna { reply, rule } para debug
-//###################################################################################
-function decideReplyWithRule(text, rules) {
-  const rawMsg = String(text || "").trim();
-  const msgN = normalizeText(rawMsg);
+        if (!intent) {
+            audit.warn("ROUTER", "IA não retornou uma intenção válida.");
+            return { 
+                type: "AI", 
+                result: { resposta: "Peço desculpa, tive uma pequena falha técnica. Pode repetir?" }, 
+                origem: "INTENT_NULL" 
+            };
+        }
 
-  for (const rule of rules || []) {
-    const type = stripBom(rule.matchType).trim().toUpperCase();
-    const keyRaw = stripBom(rule.chave || "");
+        return intent;
 
-    if (type === "SPECIAL") continue;
+    } catch (error) {
+        audit.error("ROUTER_FATAL", `Erro crítico no roteamento: ${error.message}`, {
+            dbId,
+            stack: error.stack
+        });
 
-    if (type === "REGEX") {
-      try {
-        const re = new RegExp(keyRaw, "i");
-        if (re.test(msgN)) return { reply: String(rule.resposta || "").trim(), rule };
-      } catch (_) {}
-      continue;
+        return { 
+            type: "AI", 
+            result: { resposta: "Estou a processar muita informação de momento. Pode tentar de novo?" }, 
+            origem: "ROUTER_ERROR_FALLBACK" 
+        };
     }
-
-    if (type === "KEYWORDS") {
-      const kws = splitKeywords(keyRaw);
-      if (kws.some((kw) => hasKeyword(msgN, kw))) {
-        return { reply: String(rule.resposta || "").trim(), rule };
-      }
-      continue;
-    }
-
-    const keyN = normalizeText(keyRaw);
-
-    if (type === "EXACT") {
-      if (msgN === keyN) return { reply: String(rule.resposta || "").trim(), rule };
-      continue;
-    }
-
-    if (type === "CONTAINS") {
-      if (keyN && msgN.includes(keyN)) return { reply: String(rule.resposta || "").trim(), rule };
-      continue;
-    }
-  }
-
-  return { reply: "", rule: null };
 }
 
-function decideReply(text, rules) {
-  return decideReplyWithRule(text, rules).reply;
-}
-
-module.exports = {
-  normalizeText,
-  getSpecial,
-  decideReply,
-  decideReplyWithRule,
-};
+module.exports = { processMessage };

@@ -3,202 +3,146 @@
 //###################################################################################
 "use strict";
 
-const { logAudit } = require("../services/auditLogger");
+const audit = require("../services/audit");
+const lockManager = require("../services/lockManager");
 
 /**
- * Roteia a intenção detetada para o serviço correspondente (Livraria, Ausências, Ensaios, etc.)
+ * Roteia a intenção detetada para o serviço correspondente.
+ * Implementa Lock por utilizador/processo para evitar sobrecarga de I/O em duplicado.
  */
 async function executeProcess(aiData, bodyRaw, cfg, isColab, dbId, fullName, accData) {
     let rawText = "";
     let origem = "AI_GENERICA";
+    
+    // Chave de lock específica para processos de I/O (evita que o mesmo utilizador dispare 2 pesquisas)
+    const processLockKey = `proc_${dbId}`;
 
-    // 1. PESQUISA GERAL DE LIVRARIA
-    if (
-        aiData?.processo === "LIVRARIA" ||
-        (aiData?.processo?.includes("LIVRARIA") &&
-            !aiData?.processo?.includes("AUTORES") &&
-            !aiData?.processo?.includes("EDITORAS") &&
-            !aiData?.processo?.includes("PESQUISA_"))
-    ) {
-        try {
-            const libService = require("../services/appLivraria");
-            const targetSheet = (cfg.sheetNameLivraria || process.env.SHEET_NAME_LIVRARIA || "DB_STOCK").trim();
-            const livrariaSpreadsheetId = process.env.SPREADSHEET_LIVRARIA_ID || cfg.spreadsheetLivrariaId;
+    try {
+        // 1. PESQUISA GERAL DE LIVRARIA
+        if (
+            aiData?.processo === "LIVRARIA" ||
+            (aiData?.processo?.includes("LIVRARIA") &&
+                !aiData?.processo?.includes("AUTORES") &&
+                !aiData?.processo?.includes("EDITORAS") &&
+                !aiData?.processo?.includes("PESQUISA_"))
+        ) {
+            if (!lockManager.acquire(processLockKey)) return { rawText: "Já estou a pesquisar os livros para ti, um momento...", origem: "WAIT_LOCK" };
+            
+            try {
+                const libService = require("../services/appLivraria");
+                const targetSheet = (cfg.sheetNameLivraria || process.env.SHEET_NAME_LIVRARIA || "DB_STOCK").trim();
+                const livrariaSpreadsheetId = process.env.SPREADSHEET_LIVRARIA_ID || cfg.spreadsheetLivrariaId;
 
-            if (!livrariaSpreadsheetId) throw new Error("SPREADSHEET_LIVRARIA_ID não configurado no .env");
+                if (!livrariaSpreadsheetId) throw new Error("SPREADSHEET_LIVRARIA_ID ausente");
 
-            const termoFinal = (aiData.termo !== undefined && aiData.termo !== null) ? aiData.termo : bodyRaw;
-
-            rawText = await libService.getLivrosEmStock_v1({
-                spreadsheetId: livrariaSpreadsheetId,
-                sheetName: targetSheet,
-                searchTerm: termoFinal
-            });
-            origem = "DB_LIVRARIA";
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Livraria: ${e.message}`, isColab });
+                const termoFinal = aiData.termo ?? bodyRaw;
+                rawText = await libService.getLivrosEmStock_v1({
+                    spreadsheetId: livrariaSpreadsheetId,
+                    sheetName: targetSheet,
+                    searchTerm: termoFinal
+                });
+                origem = "DB_LIVRARIA";
+            } finally {
+                lockManager.release(processLockKey);
+            }
         }
-    }
 
-    // 2. LISTAGEM DE AUTORES OU EDITORAS
-    else if (aiData?.processo === "__APP_LIVRARIA_AUTORES__" || aiData?.processo === "__APP_LIVRARIA_EDITORAS__") {
-        try {
+        // 2. LISTAGEM DE AUTORES OU EDITORAS
+        else if (aiData?.processo === "__APP_LIVRARIA_AUTORES__" || aiData?.processo === "__APP_LIVRARIA_EDITORAS__") {
             const libService = require("../services/appLivraria");
-            const targetSheet = (cfg.sheetNameLivraria || process.env.SHEET_NAME_LIVRARIA || "DB_STOCK").trim();
             const livrariaSpreadsheetId = process.env.SPREADSHEET_LIVRARIA_ID || cfg.spreadsheetLivrariaId;
-
-            if (!livrariaSpreadsheetId) throw new Error("SPREADSHEET_LIVRARIA_ID não configurado no .env");
-
             const tipoLista = aiData.processo === "__APP_LIVRARIA_AUTORES__" ? "AUTORES" : "EDITORAS";
 
             rawText = await libService.getListasLivraria_v1({
                 spreadsheetId: livrariaSpreadsheetId,
-                sheetName: targetSheet,
+                sheetName: (cfg.sheetNameLivraria || "DB_STOCK").trim(),
                 tipo: tipoLista
             });
             origem = `DB_LIVRARIA_${tipoLista}`;
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Livraria Listas: ${e.message}`, isColab });
         }
-    }
 
-    // 3. PESQUISA EXCLUSIVA POR AUTOR OU EDITORA
-    else if (aiData?.processo === "__APP_LIVRARIA_PESQUISA_AUTOR__" || aiData?.processo === "__APP_LIVRARIA_PESQUISA_EDITORA__") {
-        try {
-            const libService = require("../services/appLivraria");
-            const targetSheet = (cfg.sheetNameLivraria || process.env.SHEET_NAME_LIVRARIA || "DB_STOCK").trim();
-            const livrariaSpreadsheetId = process.env.SPREADSHEET_LIVRARIA_ID || cfg.spreadsheetLivrariaId;
-
-            if (!livrariaSpreadsheetId) throw new Error("SPREADSHEET_LIVRARIA_ID não configurado no .env");
-
-            const tipoFiltro = aiData.processo === "__APP_LIVRARIA_PESQUISA_AUTOR__" ? "AUTOR" : "EDITORA";
-            const termoFinalExclusivo = (aiData.termo !== undefined && aiData.termo !== null) ? aiData.termo : bodyRaw;
-
-            rawText = await libService.getLivrosExclusivos_v1({
-                spreadsheetId: livrariaSpreadsheetId,
-                sheetName: targetSheet,
-                tipoFiltro: tipoFiltro,
-                termoPesquisa: termoFinalExclusivo
-            });
-            origem = `DB_LIVRARIA_EXCLUSIVO_${tipoFiltro}`;
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Livraria Exclusiva: ${e.message}`, isColab });
-        }
-    }
-
-    // 4. AUSÊNCIAS / FÉRIAS
-    else if (aiData?.processo === "__AUSENCIAS__") {
-        try {
-            const ausenciasService = require("../services/appAusencias");
-            rawText = await ausenciasService.getMinhasAusencias_v1({
-                chatId: dbId,
-                fullName: fullName
-            });
-            origem = "DB_AUSENCIAS";
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Ausências: ${e.message}`, isColab });
-            rawText = "Desculpa, ocorreu um erro ao consultar as tuas ausências na base de dados.";
-        }
-    }
-
-    // 5. ENSAIO
-    else if (aiData?.processo === "__APP_ENSAIO__") {
-        try {
-            const mod = require("../services/appEnsaio");
-            const sheetNameEnsaio = String(cfg?.sheetNameEnsaio || process.env.SHEET_NAME_ENSAIO || "").trim();
-
-            if (!sheetNameEnsaio) throw new Error("Aba de Ensaios não configurada.");
-
-            const out = await mod.getLatestEnsaio_v1({
-                spreadsheetId: cfg.spreadsheetId,
-                sheetNameEnsaio
-            });
-
-            if (typeof out === "string" && out.trim()) {
-                rawText = out.trim();
-            } else {
-                const data = String(out?.ENSAIO || out?.data || out?.DATA || "").trim();
-                const horarioRaw = String(out?.HORARIO || out?.horario || out?.HORA || out?.["HORÁRIO"] || "").trim();
-                const responsavel = String(out?.["RESPONSÁVEL"] || out?.RESPONSAVEL || out?.responsavel || "").trim();
-
-                let horario = horarioRaw;
-                const m = horarioRaw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
-                if (m) horario = `${m[1].padStart(2, "0")}:${m[2]}`;
-
-                if (data || horario || responsavel) {
-                    rawText = `A data do último ensaio no sistema é no dia ${data || "—"} às ${horario || "—"} horas e o responsável é o vocal líder ${responsavel || "—"}.`;
-                } else {
-                    rawText = "Não encontrei informações de ensaio neste momento.";
-                }
+        // 4. AUSÊNCIAS / FÉRIAS
+        else if (aiData?.processo === "__AUSENCIAS__") {
+            try {
+                const ausenciasService = require("../services/appAusencias");
+                rawText = await ausenciasService.getMinhasAusencias_v1({
+                    chatId: dbId,
+                    fullName: fullName
+                });
+                origem = "DB_AUSENCIAS";
+            } catch (e) {
+                audit.error("PROC_AUSENCIAS", e.message, { dbId });
+                rawText = "Ocorreu um erro ao consultar as tuas ausências.";
             }
-            origem = "DB_ENSAIO";
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Ensaio: ${e.message}`, isColab });
-            rawText = "Não consegui consultar o ensaio neste momento.";
         }
-    }
 
-    // 6. AGENDA
-    else if (aiData?.processo === "__APP_AGENDA_FULL__") {
-        try {
+        // 5. ENSAIO
+        else if (aiData?.processo === "__APP_ENSAIO__") {
+            try {
+                const mod = require("../services/appEnsaio");
+                const sheetNameEnsaio = String(cfg?.sheetNameEnsaio || process.env.SHEET_NAME_ENSAIO || "").trim();
+
+                const out = await mod.getLatestEnsaio_v1({
+                    spreadsheetId: cfg.spreadsheetId,
+                    sheetNameEnsaio
+                });
+
+                if (typeof out === "string") {
+                    rawText = out;
+                } else {
+                    const data = out?.ENSAIO || out?.data || "—";
+                    const responsavel = out?.RESPONSÁVEL || out?.responsavel || "—";
+                    rawText = `O próximo ensaio está marcado para ${data} com o líder ${responsavel}.`;
+                }
+                origem = "DB_ENSAIO";
+            } catch (e) {
+                audit.error("PROC_ENSAIO", e.message);
+                rawText = "Não consegui verificar os ensaios agora.";
+            }
+        }
+
+        // 6. AGENDA
+        else if (aiData?.processo === "__APP_AGENDA_FULL__") {
             const mod = require("../services/appAgenda");
-            const sheetNameAgenda = String(cfg?.sheetNameAgenda || process.env.SHEET_NAME_AGENDA || "").trim();
-
-            if (!sheetNameAgenda) throw new Error("Aba de Agenda não configurada.");
-
             const payload = await mod.getAgendaDepartamentos_v1({
                 spreadsheetId: cfg.spreadsheetId,
-                sheetNameAgenda,
-                cacheSeconds: cfg.cacheAgendaSeconds,
-                timeZone: "Europe/Lisbon"
+                sheetNameAgenda: cfg.sheetNameAgenda,
+                cacheSeconds: cfg.cacheAgendaSeconds
             });
             rawText = mod.formatAgendaDepartamentosText_v1(payload, "Europe/Lisbon");
             origem = "DB_AGENDA";
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Agenda: ${e.message}`, isColab });
-            rawText = "Não consegui consultar a agenda dos departamentos neste momento.";
         }
-    }
 
-    // 7. ESCALAS
-    else if (aiData?.processo === "__ESCALAS__" || aiData?.processo === "__ESCALA__") {
-        try {
-            const escalaService = require("../services/appEscala");
-            const managerScaleFlow = require("../services/managerScaleFlow");
+        // 7. ESCALAS
+        else if (aiData?.processo === "__ESCALAS__" || aiData?.processo === "__ESCALA__") {
+            if (!lockManager.acquire(processLockKey)) return { rawText: "Estou a verificar a tua escala, um segundo...", origem: "WAIT_LOCK" };
+            
+            try {
+                const escalaService = require("../services/appEscala");
+                const managerScaleFlow = require("../services/managerScaleFlow");
 
-            if (accData?.isManager === true) {
-                const flowStart = await managerScaleFlow.startEscalaFlow_v1({
-                    chatId: dbId,
-                    accData,
-                    cfg,
-                    bodyRaw,
-                });
-
-                if (flowStart?.handled) {
-                    rawText = flowStart.rawText || "";
-                    origem = flowStart.origem || "FLOW_ESCALA_MANAGER_SCOPE";
-                    return { rawText, origem };
+                if (accData?.isManager) {
+                    const flowStart = await managerScaleFlow.startEscalaFlow_v1({
+                        chatId: dbId, accData, cfg, bodyRaw
+                    });
+                    if (flowStart?.handled) return { rawText: flowStart.rawText, origem: flowStart.origem };
                 }
+
+                rawText = await escalaService.getMinhasEscalas_v1({
+                    spreadsheetId: cfg.spreadsheetId,
+                    sheetNameBpService: cfg.sheetNameBp,
+                    sheetNameEscala: process.env.SHEET_NAME_ESCALA || "BP ESCALA",
+                    chatId: dbId
+                });
+                origem = "DB_ESCALAS";
+            } finally {
+                lockManager.release(processLockKey);
             }
-
-            const sheetNameBpService = String(cfg?.sheetNameBp || process.env.SHEET_NAME_BP || process.env.SHEET_NAME_BP_SERVICE || "").trim();
-            const sheetNameEscala = String(process.env.SHEET_NAME_ESCALA || "BP ESCALA").trim();
-
-            if (!sheetNameBpService) throw new Error("Aba BP SERVICE não configurada.");
-            if (!sheetNameEscala) throw new Error("Aba BP ESCALA não configurada.");
-
-            rawText = await escalaService.getMinhasEscalas_v1({
-                spreadsheetId: cfg.spreadsheetId,
-                sheetNameBpService,
-                sheetNameEscala,
-                chatId: dbId
-            });
-
-            origem = "DB_ESCALAS";
-        } catch (e) {
-            logAudit({ type: "ERRO", error: `Proc Escalas: ${e.message}`, isColab });
-            rawText = "Não consegui consultar a tua escala neste momento.";
         }
+
+    } catch (error) {
+        audit.error("PROCESS_DISPATCHER", `Falha crítica no processo ${aiData?.processo}`, { error: error.message });
+        rawText = "Tive um problema ao aceder à base de dados. Podes tentar daqui a pouco?";
     }
 
     return { rawText, origem };

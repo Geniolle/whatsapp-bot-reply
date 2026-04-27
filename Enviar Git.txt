@@ -25,6 +25,18 @@ git status ; git add . ; git commit -m "Atualização" ; git push
 ssh -i chave.key ubuntu@132.145.57.133
 cd whatsapp-bot-reply
 
+Monitorização Rápida (Lista de Status)
+pm2 list
+
+Monitorização em Tempo Real (Dashboard)
+pm2 monit
+
+Verificação de Logs de Erro
+pm2 logs bot-igreja --lines 50
+
+(Carga do Sistema)
+htop
+
 🚀 Passo 2: Descarregar as atualizações do GitHub
 git pull
 
@@ -46,6 +58,7 @@ pm2 flush
 
 🚀 Passo 6: Para veres os logs e confirmares que reiniciou bem
 pm2 logs
+pm2 logs bot-igreja
 
 Unico disparo.
 git pull; npm install; pm2 restart all; pm2 flush; pm2 logs
